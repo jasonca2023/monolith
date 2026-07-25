@@ -67,6 +67,24 @@ export interface ActuationResult {
   durationMs: number;
 }
 
+export type FocusStatus = 'applied' | 'unsupported' | 'failed';
+
+export interface FocusResult {
+  status: FocusStatus;
+  detail: string;
+  durationMs: number;
+}
+
+export interface DisengageReport {
+  ok: boolean;
+  profileId: string;
+  focus_result: FocusResult;
+  physical_result: ActuationResult;
+  browser: BrowserDispatchResult;
+  durationMs: number;
+  errors: string[];
+}
+
 export interface RealityShiftReport {
   ok: boolean;
   profileId: string;
@@ -85,6 +103,7 @@ export interface RealityShiftReport {
   sonic_layering: SonicLayering | null;
   physical_result: ActuationResult;
   sonic_result: ActuationResult;
+  focus_result: FocusResult;
   startedAt: string;
   finishedAt: string;
   durationMs: number;
@@ -108,6 +127,7 @@ export interface SystemInfo {
 
 export interface MonolithApi {
   executeRealityShift(profilePayload: unknown): Promise<RealityShiftReport>;
+  executeDisengage(profileId: string): Promise<DisengageReport>;
   dispatchBrowserSignal(
     signal: 'AGGRESSIVE_PURGE' | 'HYDRATE_SESSION',
     payload?: unknown,

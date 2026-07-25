@@ -144,6 +144,25 @@ export async function applyLighting(
   }
 }
 
+/** D65 white — the "Neutral State" the room returns to on disengage. */
+const NEUTRAL_WHITE: [number, number] = [0.3127, 0.329];
+
+/**
+ * Restores standard white ambient illumination. Shares the transport with
+ * applyLighting so a disengage reports failures the same way an engage does.
+ */
+export async function restoreLighting(settings: UserSettings): Promise<ActuationResult> {
+  return applyLighting(
+    {
+      lights_enabled: true,
+      hex_color: '#FFFFFF',
+      brightness: 100,
+      hue_xy_payload: NEUTRAL_WHITE,
+    },
+    settings,
+  );
+}
+
 /* -------------------------------------------------------------------------- */
 /* Spotify                                                                     */
 /* -------------------------------------------------------------------------- */

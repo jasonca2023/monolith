@@ -16,7 +16,8 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
-import { applyAudio, applyLighting, type ActuationResult } from './actuators';
+import { applyAudio, applyLighting, restoreLighting, type ActuationResult } from './actuators';
+import { setSystemFocus, type FocusResult } from './focus-mode';
 import type {
   DigitalPurge,
   MonolithConfig,
@@ -136,6 +137,8 @@ export interface RealityShiftReport {
   physical_result: ActuationResult;
   /** Outcome of the actual Spotify call. */
   sonic_result: ActuationResult;
+  /** Outcome of the OS Do Not Disturb / Focus Assist toggle. */
+  focus_result: FocusResult;
   startedAt: string;
   finishedAt: string;
   durationMs: number;
@@ -510,7 +513,10 @@ async function killProcess(rawName: unknown): Promise<KillResult> {
 
 interface BridgeEnvelope {
   type: string;
+  /** Wire-format alias for `type`; the extension accepts either. */
+  action: string;
   payload?: unknown;
+  profileId?: string;
   issuedAt: string;
   id: string;
 }
@@ -602,9 +608,13 @@ class OrchestrationBridge {
     if (socket.readyState !== WebSocket.OPEN) return false;
 
     this.sequence += 1;
+    const payload = message.payload as { profileId?: string } | undefined;
     const envelope: BridgeEnvelope = {
       type: message.type,
+      action: message.type,
       payload: message.payload,
+      // Hoisted alongside the payload so the worker can read it either way.
+      profileId: payload?.profileId,
       issuedAt: new Date().toISOString(),
       id: `sig_${Date.now().toString(36)}_${this.sequence}`,
     };
@@ -711,17 +721,20 @@ async function executeRealityShift(payload: unknown): Promise<RealityShiftReport
 
   // Lights and audio go out alongside the process work — a slow Hue bridge must
   // not delay the apps the user is waiting on.
-  const [launchOutcomes, killOutcomes, physicalResult, sonicResult] = await Promise.all([
+  const [launchOutcomes, killOutcomes, physicalResult, sonicResult, focusResult] = await Promise.all([
     Promise.allSettled(apps.map((target) => launchApplication(target))),
     Promise.allSettled(kills.map((target) => killProcess(target))),
     applyLighting(profile.physical_orchestration, settings),
     applyAudio(profile.sonic_layering, settings),
+    setSystemFocus(true),
   ]);
 
   log('info', 'iot', `lighting ${physicalResult.status}: ${physicalResult.detail}`);
   log('info', 'sonic', `audio ${sonicResult.status}: ${sonicResult.detail}`);
+  log('info', 'focus', `system focus ${focusResult.status}: ${focusResult.detail}`);
   if (physicalResult.status === 'failed') errors.push(`lighting: ${physicalResult.detail}`);
   if (sonicResult.status === 'failed') errors.push(`audio: ${sonicResult.detail}`);
+  if (focusResult.status === 'failed') errors.push(`focus: ${focusResult.detail}`);
 
   const launchResults: LaunchResult[] = launchOutcomes.map((outcome, index) =>
     outcome.status === 'fulfilled'
@@ -790,9 +803,64 @@ async function executeRealityShift(payload: unknown): Promise<RealityShiftReport
     sonic_layering: profile.sonic_layering,
     physical_result: physicalResult,
     sonic_result: sonicResult,
+    focus_result: focusResult,
     startedAt: startedAt.toISOString(),
     finishedAt: finishedAt.toISOString(),
     durationMs,
+    errors,
+  };
+}
+
+export interface DisengageReport {
+  ok: boolean;
+  profileId: string;
+  focus_result: FocusResult;
+  physical_result: ActuationResult;
+  browser: BrowserDispatchResult;
+  durationMs: number;
+  errors: string[];
+}
+
+/**
+ * The exit sequence: drop OS focus filters, return the room to neutral white,
+ * and tell the extension to rebuild the session. Runs in parallel — none of the
+ * three depends on another, and a failure in one must not strand the others.
+ */
+async function executeDisengage(profileId: unknown): Promise<DisengageReport> {
+  const startedAt = Date.now();
+  const errors: string[] = [];
+  const id = typeof profileId === 'string' && profileId.length > 0 ? profileId : 'default';
+
+  log('info', 'shift', `disengaging "${id}" — restoring neutral state`);
+
+  const settings = (await configStore.read()).user_settings;
+
+  const [focusResult, physicalResult] = await Promise.all([
+    setSystemFocus(false),
+    restoreLighting(settings),
+  ]);
+
+  const receivers = bridge.broadcast('HYDRATE_SESSION', { profileId: id });
+  const browser: BrowserDispatchResult = {
+    signal: 'HYDRATE_SESSION',
+    ok: receivers > 0,
+    receivers,
+    error: receivers === 0 ? 'no extension service worker is connected' : undefined,
+  };
+
+  log('info', 'focus', `system focus ${focusResult.status}: ${focusResult.detail}`);
+  log('info', 'iot', `lighting restore ${physicalResult.status}: ${physicalResult.detail}`);
+  if (focusResult.status === 'failed') errors.push(`focus: ${focusResult.detail}`);
+  if (physicalResult.status === 'failed') errors.push(`lighting: ${physicalResult.detail}`);
+  if (!browser.ok) errors.push(`browser: ${browser.error}`);
+
+  return {
+    ok: errors.length === 0,
+    profileId: id,
+    focus_result: focusResult,
+    physical_result: physicalResult,
+    browser,
+    durationMs: Date.now() - startedAt,
     errors,
   };
 }
@@ -811,6 +879,7 @@ function emptyReport(startedAt: Date, error: string): RealityShiftReport {
     sonic_layering: null,
     physical_result: { status: 'failed', detail: error, durationMs: 0 },
     sonic_result: { status: 'failed', detail: error, durationMs: 0 },
+    focus_result: { status: 'failed', detail: error, durationMs: 0 },
     startedAt: startedAt.toISOString(),
     finishedAt: finishedAt.toISOString(),
     durationMs: finishedAt.getTime() - startedAt.getTime(),
@@ -925,6 +994,25 @@ function registerIpcHandlers(): void {
       const message = describeError(error);
       log('error', 'shift', 'unhandled failure during reality shift', message);
       return emptyReport(startedAt, message);
+    }
+  });
+
+  ipcMain.handle('execute-disengage', async (_event, profileId: unknown): Promise<DisengageReport> => {
+    const startedAt = Date.now();
+    try {
+      return await executeDisengage(profileId);
+    } catch (error) {
+      const detail = describeError(error);
+      log('error', 'shift', 'unhandled failure during disengage', detail);
+      return {
+        ok: false,
+        profileId: typeof profileId === 'string' ? profileId : 'default',
+        focus_result: { status: 'failed', detail, durationMs: 0 },
+        physical_result: { status: 'failed', detail, durationMs: 0 },
+        browser: { signal: 'NONE', ok: false, receivers: 0, error: detail },
+        durationMs: Date.now() - startedAt,
+        errors: [detail],
+      };
     }
   });
 

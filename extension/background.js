@@ -164,8 +164,16 @@ async function handleSignal(raw) {
     return;
   }
 
-  const type = envelope && envelope.type;
+  // The host sends `type` and `action` as aliases; accept either so a hand-sent
+  // frame or a future sender using only one of them still routes.
+  const type = envelope && (envelope.type || envelope.action);
   const payload = (envelope && envelope.payload) || {};
+
+  // profileId may ride alongside the payload rather than inside it.
+  if (envelope && envelope.profileId && !payload.profileId) {
+    payload.profileId = envelope.profileId;
+  }
+
   log(`signal received: ${type}`);
 
   try {

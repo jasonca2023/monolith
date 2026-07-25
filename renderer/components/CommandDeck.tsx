@@ -5,6 +5,7 @@ import type {
   MonolithConfig,
   RealityShiftReport,
 } from "../monolith";
+import CredentialsModal, { isUnconfigured } from "./CredentialsModal";
 
 type ProfileKey = "deepWork" | "brainDump" | "highEnergy" | "lateNight";
 
@@ -178,7 +179,10 @@ export default function CommandDeck(): React.JSX.Element {
   const [shellReady, setShellReady] = useState<boolean | null>(null);
   const [extensionOnline, setExtensionOnline] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [focusMode, setFocusMode] = useState(false);
+  /** null is the Neutral State: nothing engaged, room white, OS untouched. */
+  const [engagedId, setEngagedId] = useState<string | null>(null);
+  const [showCredentials, setShowCredentials] = useState(false);
+  const [credentialsDismissed, setCredentialsDismissed] = useState(false);
   const [waveId, setWaveId] = useState(0);
   const [isWaving, setIsWaving] = useState(false);
   const [logLines, setLogLines] = useState<LogLine[]>([]);
@@ -186,6 +190,7 @@ export default function CommandDeck(): React.JSX.Element {
   const logEndRef = useRef<HTMLDivElement | null>(null);
 
   const active = useMemo(() => PROFILES[activeKey], [activeKey]);
+  const focusMode = engagedId !== null;
 
   const backend: BackendProfile | null = useMemo(() => {
     if (!config) return null;
@@ -227,6 +232,7 @@ export default function CommandDeck(): React.JSX.Element {
         const [loaded, info] = await Promise.all([api.readConfig(), api.systemInfo()]);
         if (cancelled) return;
         setConfig(loaded);
+        if (isUnconfigured(loaded.user_settings)) setShowCredentials(true);
         appendLog([
           {
             tone: "success",
@@ -372,12 +378,66 @@ export default function CommandDeck(): React.JSX.Element {
         }`,
       });
 
+      const focus = report.focus_result;
+      lines.push({
+        tone: focus.status === "applied" ? "success" : "warn",
+        text: `[OS] Focus filter ${focus.status} — ${focus.detail}`,
+      });
+
       return lines;
     },
     [config],
   );
 
-  const handleNexusTrigger = useCallback(async () => {
+  /** Restores the Neutral State: OS filters off, lights white, tabs rebuilt. */
+  const handleDisengage = useCallback(async () => {
+    const api = window.monolith;
+    const target = engagedId ?? active.backendId;
+    if (!api || busy) {
+      setEngagedId(null);
+      return;
+    }
+
+    setBusy(true);
+    setIsWaving(true);
+    setWaveId((n) => n + 1);
+    window.setTimeout(() => setIsWaving(false), 650);
+
+    appendLog([{ tone: "network", text: `[IPC] execute-disengage → "${target}"` }]);
+
+    try {
+      const report = await api.executeDisengage(target);
+      appendLog([
+        {
+          tone: report.focus_result.status === "applied" ? "success" : "warn",
+          text: `[OS] Focus filter ${report.focus_result.status} — ${report.focus_result.detail}`,
+        },
+        {
+          tone: report.physical_result.status === "failed" ? "error" : "iot",
+          text: `[IoT] Neutral white ${report.physical_result.status.replace("_", " ")} — ${report.physical_result.detail}`,
+        },
+        report.browser.ok
+          ? {
+              tone: "network" as LogTone,
+              text: `[WS:${WS_PORT}] HYDRATE_SESSION delivered to ${report.browser.receivers} service worker${
+                report.browser.receivers === 1 ? "" : "s"
+              }.`,
+            }
+          : {
+              tone: "warn" as LogTone,
+              text: `[WS:${WS_PORT}] HYDRATE_SESSION undelivered — ${report.browser.error}.`,
+            },
+      ]);
+      setEngagedId(null);
+    } catch (error) {
+      appendLog([{ tone: "error", text: `[IPC] Disengage failed: ${String(error)}` }]);
+      setEngagedId(null);
+    } finally {
+      setBusy(false);
+    }
+  }, [active.backendId, appendLog, busy, engagedId]);
+
+  const handleEngage = useCallback(async () => {
     const api = window.monolith;
     if (!api || busy) return;
 
@@ -391,7 +451,7 @@ export default function CommandDeck(): React.JSX.Element {
     try {
       const report = await api.executeRealityShift(active.backendId);
       appendLog(reportToLog(report));
-      setFocusMode(true);
+      setEngagedId(active.backendId);
     } catch (error) {
       appendLog([{ tone: "error", text: `[IPC] Shift failed: ${String(error)}` }]);
     } finally {
@@ -399,23 +459,12 @@ export default function CommandDeck(): React.JSX.Element {
     }
   }, [active.backendId, appendLog, busy, reportToLog]);
 
-  const handleExitFocus = useCallback(async () => {
-    const api = window.monolith;
-    setFocusMode(false);
-    if (!api) return;
+  /** The Nexus is a single toggle: engage on first press, disengage on the next. */
+  const handleNexusTrigger = useCallback(() => {
+    void (engagedId ? handleDisengage() : handleEngage());
+  }, [engagedId, handleDisengage, handleEngage]);
 
-    appendLog([{ tone: "network", text: "[IPC] dispatch-browser-signal → HYDRATE_SESSION" }]);
-    try {
-      const result = await api.dispatchBrowserSignal("HYDRATE_SESSION", {
-        profileId: active.backendId,
-      });
-      if (!result.ok) {
-        appendLog([{ tone: "warn", text: `[WS:${WS_PORT}] Hydrate undelivered — ${result.error}.` }]);
-      }
-    } catch (error) {
-      appendLog([{ tone: "error", text: `[IPC] Hydrate failed: ${String(error)}` }]);
-    }
-  }, [active.backendId, appendLog]);
+  const handleExitFocus = handleDisengage;
 
   const handleSelectProfile = (key: ProfileKey) => {
     if (key === activeKey) return;
@@ -439,7 +488,11 @@ export default function CommandDeck(): React.JSX.Element {
   /* Derived display data — everything below comes from the live config      */
   /* ---------------------------------------------------------------------- */
 
-  const baseHex = backend?.physical_orchestration.hex_color ?? active.fallbackHex;
+  // Neutral State — the room simulation glows white until a profile is engaged.
+  const NEUTRAL_HEX = "#FFFFFF";
+  const baseHex = focusMode
+    ? backend?.physical_orchestration.hex_color ?? active.fallbackHex
+    : NEUTRAL_HEX;
   const lights: LightZone[] = [
     { label: "Key Light", hex: shade(baseHex, 0.75) },
     { label: "Monitor Bias", hex: baseHex },
@@ -510,10 +563,33 @@ export default function CommandDeck(): React.JSX.Element {
         />
       )}
 
+      {showCredentials && config && (
+        <CredentialsModal
+          config={config}
+          onSaved={(next) => {
+            setConfig(next);
+            setShowCredentials(false);
+            appendLog([{ tone: "success", text: "[SHELL] Credentials saved to monolith_config.json." }]);
+          }}
+          onDismiss={() => {
+            setShowCredentials(false);
+            setCredentialsDismissed(true);
+            appendLog([
+              {
+                tone: "warn",
+                text: "[SHELL] Running without credentials — apps and tabs only, no lights or music.",
+              },
+            ]);
+          }}
+        />
+      )}
+
       <TitleBar
         onExitFocus={focusMode ? handleExitFocus : undefined}
         shellReady={shellReady}
         extensionOnline={extensionOnline}
+        needsCredentials={credentialsDismissed && isUnconfigured(config?.user_settings)}
+        onOpenCredentials={() => setShowCredentials(true)}
       />
 
       <div className="relative z-10 flex flex-1 flex-col overflow-hidden">
@@ -545,7 +621,7 @@ export default function CommandDeck(): React.JSX.Element {
                   onClick={handleNexusTrigger}
                 />
                 <p className="text-xs uppercase tracking-widest text-slate-500">
-                  {busy ? "Executing…" : `Nexus Trigger — ${active.label}`}
+                  {busy ? "Executing…" : focusMode ? `Engaged — ${active.label}` : `Neutral state — ${active.label} staged`}
                 </p>
               </div>
 
@@ -623,10 +699,14 @@ function TitleBar({
   onExitFocus,
   shellReady,
   extensionOnline,
+  needsCredentials,
+  onOpenCredentials,
 }: {
   onExitFocus?: () => void;
   shellReady: boolean | null;
   extensionOnline: boolean;
+  needsCredentials: boolean;
+  onOpenCredentials: () => void;
 }): React.JSX.Element {
   const api = window.monolith;
 
@@ -649,6 +729,14 @@ function TitleBar({
       </div>
 
       <div className="app-no-drag flex items-center gap-2">
+        {needsCredentials && (
+          <button
+            onClick={onOpenCredentials}
+            className="rounded-full border border-indigo-500/40 px-3 py-1 text-[10px] uppercase tracking-widest text-indigo-300 transition hover:border-indigo-400 hover:text-indigo-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-300"
+          >
+            Connect lights &amp; music
+          </button>
+        )}
         {onExitFocus && (
           <button
             onClick={onExitFocus}
@@ -715,7 +803,7 @@ function NexusButton({
   onClick: () => void;
   large?: boolean;
 }): React.JSX.Element {
-  const label = busy ? "Working" : focusMode ? "Engaged" : "Engage";
+  const label = busy ? "Working" : focusMode ? "Disengage" : "Engage";
 
   return (
     <button

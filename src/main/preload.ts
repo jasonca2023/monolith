@@ -10,6 +10,8 @@ import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 export interface MonolithApi {
   /** Accepts a full profile object, a profile id, or a bare array of app paths. */
   executeRealityShift(profilePayload: unknown): Promise<unknown>;
+  /** Exit sequence: OS focus off, lights to neutral white, session rehydrated. */
+  executeDisengage(profileId: string): Promise<unknown>;
   dispatchBrowserSignal(
     signal: 'AGGRESSIVE_PURGE' | 'HYDRATE_SESSION',
     payload?: unknown,
@@ -28,6 +30,7 @@ export interface MonolithApi {
 
 const api: MonolithApi = {
   executeRealityShift: (profilePayload) => ipcRenderer.invoke('execute-reality-shift', profilePayload),
+  executeDisengage: (profileId) => ipcRenderer.invoke('execute-disengage', profileId),
   dispatchBrowserSignal: (signal, payload) =>
     ipcRenderer.invoke('dispatch-browser-signal', signal, payload),
   readConfig: () => ipcRenderer.invoke('config:read'),
