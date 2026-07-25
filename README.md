@@ -304,3 +304,24 @@ connected. Nothing there needs to be typed except the Spotify client ID and, if
 discovery cannot reach the bridge, its address: the tokens and the Hue key are
 minted by the two flows above and written to the userData copy, which sits
 outside the repo. **Do not commit filled credentials back into the template.**
+
+## Account
+
+Everything above works fully signed out — an account exists only to sync two
+things: session history and mood schedules, so they survive a reinstall or
+follow you to another machine. Email + password, via Supabase (project
+`shortify`, repurposed — see `src/main/cloud.ts`). Sign-up requires clicking a
+confirmation link before sign-in works; the app tells you this rather than
+failing silently.
+
+Session history is written to the `sessions` table on every disengage; the
+local `monolith_sessions.json` stays the source of truth when signed out and
+an offline cache when signed in. Schedules upsert to the `schedules` table on
+every edit from the dashboard's Schedule card, and pull back down — overwriting
+the local copy for any mood the cloud has a row for — at sign-in and at every
+launch where a session is already persisted. Every table is `auth.uid()`-scoped
+RLS, same convention the project's own `profiles` table already used.
+
+The auth session (never the password) persists to `monolith_auth.json` in
+userData via a small custom storage adapter — supabase-js expects a
+browser-shaped `localStorage`, which the main process doesn't have.
