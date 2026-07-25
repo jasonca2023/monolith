@@ -11,6 +11,7 @@
  */
 
 import type {
+  AppCategory,
   DigitalPurge,
   MonolithConfig,
   PhysicalOrchestration,
@@ -29,6 +30,32 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 export function toStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0);
+}
+
+const CATEGORIES = new Set<AppCategory>([
+  'games',
+  'messaging',
+  'writing',
+  'productivity',
+  'dev',
+  'browser',
+  'media',
+]);
+
+/**
+ * Drops anything that is not a category we know how to resolve. An unknown
+ * string here would silently match no apps, which reads as "the mood did
+ * nothing" rather than "the config has a typo".
+ */
+export function toCategories(value: unknown): AppCategory[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<AppCategory>();
+  for (const entry of value) {
+    if (typeof entry === 'string' && CATEGORIES.has(entry as AppCategory)) {
+      seen.add(entry as AppCategory);
+    }
+  }
+  return [...seen];
 }
 
 /** CIE 1931 xy coordinates are always a two-element pair inside the gamut. */
@@ -78,6 +105,14 @@ export function normalizeProfile(input: unknown, index: number): Profile {
       close_browser_tabs: Boolean(purge.close_browser_tabs ?? false),
       launch_applications: toStringArray(purge.launch_applications),
       kill_background_processes: toStringArray(purge.kill_background_processes),
+      launch_app_names: toStringArray(purge.launch_app_names),
+      launch_categories: toCategories(purge.launch_categories),
+      // 0 means "every installed app in the category"; the default of 2 keeps a
+      // mood asking for writing apps from opening eight of them.
+      launch_category_limit: clamp(Number(purge.launch_category_limit ?? 2), 0, 20),
+      launch_urls: toStringArray(purge.launch_urls),
+      kill_categories: toCategories(purge.kill_categories),
+      force_quit: Boolean(purge.force_quit ?? false),
       block_distractions: Boolean(purge.block_distractions ?? false),
       blocked_domains: toStringArray(purge.blocked_domains),
     },

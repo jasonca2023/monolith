@@ -58,10 +58,36 @@ export interface HuePairResult {
   detail: string;
 }
 
+/**
+ * Categories a mood can name instead of individual apps. Resolved against what
+ * is actually installed at shift time, so "quit every game" travels between
+ * machines in a way a list of absolute paths never could.
+ */
+export type AppCategory =
+  | 'games'
+  | 'messaging'
+  | 'writing'
+  | 'productivity'
+  | 'dev'
+  | 'browser'
+  | 'media';
+
 export interface DigitalPurge {
   close_browser_tabs: boolean;
   launch_applications: string[];
   kill_background_processes: string[];
+  /** Apps to open by name, resolved through discovery — "Notes", not a path. */
+  launch_app_names: string[];
+  /** Categories to open. Capped by `launch_category_limit`. */
+  launch_categories: AppCategory[];
+  /** How many apps to open per category. 0 means every one installed. */
+  launch_category_limit: number;
+  /** URLs opened in the default browser: a Figma file, a Spotify playlist. */
+  launch_urls: string[];
+  /** Categories to quit. Expanded to real process names via CFBundleExecutable. */
+  kill_categories: AppCategory[];
+  /** Escalate to SIGKILL for anything still alive after SIGTERM. */
+  force_quit: boolean;
   /** Arms the extension's redirect blockade for this mood. */
   block_distractions: boolean;
   /** Domains the blockade covers. Empty falls back to the worker's defaults. */

@@ -14,17 +14,14 @@
       "builtin": true,
       "digital_purge": {
         "close_browser_tabs": true,
-        "launch_applications": [
-          "/Applications/Cursor.app",
-          "/Applications/Visual Studio Code.app"
-        ],
-        "kill_background_processes": [
-          "Music",
-          "Messages",
-          "Microsoft Teams",
-          "Microsoft Outlook",
-          "zoom.us"
-        ],
+        "launch_applications": [],
+        "launch_app_names": ["Visual Studio Code", "Cursor", "Notes"],
+        "launch_categories": [],
+        "launch_category_limit": 2,
+        "launch_urls": [],
+        "kill_background_processes": [],
+        "kill_categories": ["games", "messaging"],
+        "force_quit": true,
         "block_distractions": true,
         "blocked_domains": [
           "twitter.com",
@@ -46,8 +43,8 @@
       },
       "sonic_layering": {
         "spotify_enabled": true,
-        "playlist_uri": "spotify:playlist:37i9dQZF1DWWQRwui0ExPn",
-        "target_frequency_profile": "Binaural Focus Waves"
+        "playlist_uri": "spotify:playlist:37i9dQZF1DWZeKCadgRdKQ",
+        "target_frequency_profile": "Deep Focus"
       }
     },
     {
@@ -56,11 +53,14 @@
       "builtin": true,
       "digital_purge": {
         "close_browser_tabs": false,
-        "launch_applications": [
-          "/System/Applications/Freeform.app",
-          "/System/Applications/Notes.app"
-        ],
+        "launch_applications": [],
+        "launch_app_names": [],
+        "launch_categories": ["writing"],
+        "launch_category_limit": 2,
+        "launch_urls": ["https://www.figma.com/files/recents-and-sharing"],
         "kill_background_processes": [],
+        "kill_categories": [],
+        "force_quit": false,
         "block_distractions": false,
         "blocked_domains": []
       },
@@ -72,8 +72,8 @@
       },
       "sonic_layering": {
         "spotify_enabled": true,
-        "playlist_uri": "spotify:playlist:37i9dQZF1DWWQRwui0ExPm",
-        "target_frequency_profile": "Deep Lofi Beats"
+        "playlist_uri": "spotify:playlist:37i9dQZF1DWWQRwui0ExPn",
+        "target_frequency_profile": "Lofi Beats"
       }
     },
     {
@@ -82,19 +82,16 @@
       "builtin": true,
       "digital_purge": {
         "close_browser_tabs": true,
-        "launch_applications": [
-          "/System/Applications/Music.app"
-        ],
-        "kill_background_processes": [
-          "Microsoft Outlook",
-          "Microsoft Teams"
-        ],
+        "launch_applications": [],
+        "launch_app_names": [],
+        "launch_categories": [],
+        "launch_category_limit": 2,
+        "launch_urls": [],
+        "kill_background_processes": [],
+        "kill_categories": ["messaging"],
+        "force_quit": false,
         "block_distractions": true,
-        "blocked_domains": [
-          "youtube.com",
-          "netflix.com",
-          "twitch.tv"
-        ]
+        "blocked_domains": ["youtube.com", "netflix.com", "twitch.tv"]
       },
       "physical_orchestration": {
         "lights_enabled": true,
@@ -104,8 +101,8 @@
       },
       "sonic_layering": {
         "spotify_enabled": true,
-        "playlist_uri": "spotify:playlist:37i9dQZF1DWWQRwui0ExPl",
-        "target_frequency_profile": "High Tempo Synthwave"
+        "playlist_uri": "spotify:playlist:37i9dQZF1DX76Wlfdnj7AP",
+        "target_frequency_profile": "Beast Mode"
       }
     },
     {
@@ -114,15 +111,14 @@
       "builtin": true,
       "digital_purge": {
         "close_browser_tabs": false,
-        "launch_applications": [
-          "/System/Applications/Podcasts.app"
-        ],
-        "kill_background_processes": [
-          "Cursor",
-          "Code",
-          "Xcode",
-          "Sourcetree"
-        ],
+        "launch_applications": [],
+        "launch_app_names": ["Discord"],
+        "launch_categories": [],
+        "launch_category_limit": 2,
+        "launch_urls": ["https://discord.com/app"],
+        "kill_background_processes": ["Code", "Cursor"],
+        "kill_categories": [],
+        "force_quit": false,
         "block_distractions": false,
         "blocked_domains": []
       },
@@ -134,7 +130,7 @@
       },
       "sonic_layering": {
         "spotify_enabled": true,
-        "playlist_uri": "spotify:playlist:37i9dQZF1DWWQRwui0ExPk",
+        "playlist_uri": "spotify:playlist:37i9dQZF1DWYcDQ1hSjOpY",
         "target_frequency_profile": "Ambient Wind Down"
       }
     }

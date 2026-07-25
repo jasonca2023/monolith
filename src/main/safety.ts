@@ -166,14 +166,23 @@ export function assertKillable(name: unknown): string {
   return trimmed;
 }
 
-export function buildKillCommand(name: string, platform: Platform = process.platform): string {
+/**
+ * `force` escalates to SIGKILL on POSIX. Windows has no gentler option to
+ * escalate from — `taskkill /F` is already unconditional — so the flag changes
+ * nothing there.
+ */
+export function buildKillCommand(
+  name: string,
+  platform: Platform = process.platform,
+  force = false,
+): string {
   if (platform === 'win32') {
     const image = /\.exe$/i.test(name) ? name : `${name}.exe`;
     return `taskkill /F /IM ${quoteWindows(image)}`;
   }
   // -i: case-insensitive, -x: whole-name match, so "Steam" never matches
   // "steamwebhelper-adjacent" processes by prefix.
-  return `pkill -i -x -- ${quotePosix(name)}`;
+  return `pkill ${force ? '-9 ' : ''}-i -x -- ${quotePosix(name)}`;
 }
 
 /**

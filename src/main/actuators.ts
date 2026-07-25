@@ -207,9 +207,17 @@ export interface SpotifyTokenSource {
   refresh(): Promise<string | null>;
 }
 
+/**
+ * Hands a `spotify:` URI to the desktop client. Injected rather than imported
+ * so this module stays free of platform shelling and stays testable.
+ * Resolves false when the handoff could not be made.
+ */
+export type SpotifyHandoff = (playlistUri: string) => Promise<boolean>;
+
 export async function applyAudio(
   directive: SonicLayering,
   auth: SpotifyTokenSource,
+  handoff?: SpotifyHandoff,
 ): Promise<ActuationResult> {
   const startedAt = Date.now();
   const done = (status: ActuationStatus, detail: string): ActuationResult => ({
@@ -227,8 +235,31 @@ export async function applyAudio(
 
   try {
     let token = await auth.getAccessToken();
+
+    // Without a grant there is still a way to start music: handing the URI to
+    // the desktop client opens the playlist and plays it. It needs no token, no
+    // developer app and no Premium account, which is the difference between a
+    // mood that plays music on any machine and one that only plays after a
+    // five-minute OAuth setup. The Web API is still preferred when connected —
+    // only it can report what actually happened.
     if (!token) {
-      return done('not_configured', 'Spotify is not connected — authorize it from the credentials panel');
+      if (!handoff) {
+        return done(
+          'not_configured',
+          'Spotify is not connected — authorize it from the credentials panel',
+        );
+      }
+
+      const opened = await handoff(directive.playlist_uri);
+      if (!opened) {
+        return done('failed', 'could not hand the playlist to the Spotify app');
+      }
+
+      const label = directive.target_frequency_profile || directive.playlist_uri;
+      return done(
+        'applied',
+        `opened ${label} in the Spotify app (no API token, so playback is unconfirmed)`,
+      );
     }
 
     const play = () =>

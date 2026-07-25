@@ -21,9 +21,11 @@ import {
   applyLighting,
   isPlaceholder,
   restoreLighting,
+  type SpotifyHandoff,
   type SpotifyTokenSource,
 } from './actuators';
 import { setSystemFocus } from './focus-mode';
+import { discoverApps, resolveTargets } from './app-catalog';
 import { discoverBridges, pairWithBridge } from './hue-setup';
 import { authorize, isExpired, refreshTokens, type SpotifyTokens } from './spotify-auth';
 import { isRecord, normalizeConfig, normalizeProfile } from './normalize';
@@ -32,7 +34,10 @@ import {
   assertLaunchable,
   buildKillCommand,
   buildLaunchCommand,
+  hasControlCharacters,
   isNotRunningExit,
+  quotePosix,
+  quoteWindows,
 } from './safety';
 import type {
   ActuationResult,
@@ -66,6 +71,12 @@ const BRIDGE_HEARTBEAT_MS = 30_000;
 const LAUNCH_TIMEOUT_MS = 15_000;
 const KILL_TIMEOUT_MS = 10_000;
 const CONFIG_FILENAME = 'monolith_config.json';
+
+/** How long a SIGTERM gets to land before force_quit escalates to SIGKILL. */
+const FORCE_QUIT_GRACE_MS = 1500;
+
+/** Schemes a mood may open. Excludes file: — that is what launch paths are for. */
+const ALLOWED_URL_SCHEMES = new Set(['http', 'https', 'spotify', 'figma']);
 
 /* -------------------------------------------------------------------------- */
 /* Shared contract                                                             */
@@ -236,11 +247,63 @@ async function launchApplication(rawTarget: unknown): Promise<LaunchResult> {
   }
 }
 
+/**
+ * Opens a URL through the platform handler. Distinct from launching an app: a
+ * mood can open a Figma file or a Spotify playlist, neither of which is a path
+ * on disk, and `spotify:` in particular starts playback with no API token.
+ */
+async function launchUrl(rawUrl: unknown): Promise<LaunchResult> {
+  const startedAt = Date.now();
+  const label = typeof rawUrl === 'string' ? rawUrl.trim() : String(rawUrl);
+
+  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(label)?.[1]?.toLowerCase();
+  if (!scheme || !ALLOWED_URL_SCHEMES.has(scheme)) {
+    const error = `"${label}" is not an http(s), spotify or figma URL`;
+    log('warn', 'launch', `skipped ${error}`);
+    return { target: label, status: 'failed', durationMs: Date.now() - startedAt, error };
+  }
+  if (hasControlCharacters(label)) {
+    const error = 'URL contains control characters';
+    return { target: label, status: 'failed', durationMs: Date.now() - startedAt, error };
+  }
+
+  const command =
+    process.platform === 'win32'
+      ? `start "" ${quoteWindows(label)}`
+      : `${process.platform === 'darwin' ? 'open' : 'xdg-open'} ${quotePosix(label)}`;
+
+  try {
+    await execAsync(command, { timeout: LAUNCH_TIMEOUT_MS, windowsHide: true, maxBuffer: 1024 * 1024 });
+    log('info', 'launch', `opened ${label}`);
+    return { target: label, status: 'launched', durationMs: Date.now() - startedAt, command };
+  } catch (error) {
+    const message = describeError(error);
+    log('error', 'launch', `failed to open ${label}: ${message}`);
+    return { target: label, status: 'failed', durationMs: Date.now() - startedAt, command, error: message };
+  }
+}
+
+/**
+ * The no-credentials route to music: the Spotify client registers the
+ * `spotify:` scheme, so opening the URI selects the playlist and plays it.
+ * Used only when the Web API has no token — it cannot report what happened.
+ */
+const openPlaylistInSpotify: SpotifyHandoff = async (playlistUri) => {
+  const uri = playlistUri.trim();
+  if (!/^spotify:[a-z]+:[A-Za-z0-9]+$/.test(uri)) {
+    log('warn', 'sonic', `"${uri}" is not a spotify: URI, so it cannot be handed to the app`);
+    return false;
+  }
+
+  const result = await launchUrl(uri);
+  return result.status === 'launched';
+};
+
 /* -------------------------------------------------------------------------- */
 /* Background process terminator                                               */
 /* -------------------------------------------------------------------------- */
 
-async function killProcess(rawName: unknown): Promise<KillResult> {
+async function killProcess(rawName: unknown, force = false): Promise<KillResult> {
   const startedAt = Date.now();
   const label = typeof rawName === 'string' ? rawName : String(rawName);
 
@@ -257,7 +320,20 @@ async function killProcess(rawName: unknown): Promise<KillResult> {
 
   try {
     await execAsync(command, { timeout: KILL_TIMEOUT_MS, windowsHide: true, maxBuffer: 1024 * 1024 });
-    log('info', 'kill', `terminated "${name}"`);
+
+    // SIGTERM lets an app save and exit, which is what most should get. A game
+    // mid-frame often ignores it, so force_quit escalates — but only after the
+    // polite request has been made and given a moment to land.
+    if (force) {
+      await new Promise((resolve) => setTimeout(resolve, FORCE_QUIT_GRACE_MS));
+      await execAsync(buildKillCommand(name, undefined, true), {
+        timeout: KILL_TIMEOUT_MS,
+        windowsHide: true,
+        maxBuffer: 1024 * 1024,
+      }).catch(() => undefined); // Already gone is the expected outcome here.
+    }
+
+    log('info', 'kill', `terminated "${name}"${force ? ' (forced)' : ''}`);
     return { target: name, status: 'terminated', durationMs: Date.now() - startedAt, command };
   } catch (error) {
     if (isNotRunningExit(error)) {
@@ -545,28 +621,37 @@ async function executeRealityShift(payload: unknown): Promise<RealityShiftReport
     return emptyReport(startedAt, message);
   }
 
-  const { launch_applications, kill_background_processes, close_browser_tabs } = profile.digital_purge;
+  const { close_browser_tabs, force_quit } = profile.digital_purge;
+
+  // Names and categories become real paths and process names here, against what
+  // this machine actually has installed.
+  const { apps, urls, processes: kills, unresolved } = resolveTargets(
+    profile.digital_purge,
+    await discoverApps(),
+  );
+  for (const missing of unresolved) {
+    log('warn', 'shift', `nothing installed satisfies "${missing}"`);
+  }
 
   log(
     'info',
     'shift',
-    `executing "${profile.name}" — ${launch_applications.length} app(s), ` +
-      `${kill_background_processes.length} process(es), browser purge ${close_browser_tabs}`,
+    `executing "${profile.name}" — ${apps.length} app(s), ${urls.length} url(s), ` +
+      `${kills.length} process(es), browser purge ${close_browser_tabs}`,
   );
-
-  // Dedupe so a profile listing the same target twice does not act twice.
-  const apps = Array.from(new Set(launch_applications.map((entry) => entry.trim())));
-  const kills = Array.from(new Set(kill_background_processes.map((entry) => entry.trim())));
 
   const settings = (await configStore.read()).user_settings;
 
   // Lights and audio go out alongside the process work — a slow Hue bridge must
   // not delay the apps the user is waiting on.
   const [launchOutcomes, killOutcomes, physicalResult, sonicResult, focusResult] = await Promise.all([
-    Promise.allSettled(apps.map((target) => launchApplication(target))),
-    Promise.allSettled(kills.map((target) => killProcess(target))),
+    Promise.allSettled([
+      ...apps.map((target) => launchApplication(target)),
+      ...urls.map((target) => launchUrl(target)),
+    ]),
+    Promise.allSettled(kills.map((target) => killProcess(target, force_quit))),
     applyLighting(profile.physical_orchestration, settings),
-    applyAudio(profile.sonic_layering, spotifyCredentials),
+    applyAudio(profile.sonic_layering, spotifyCredentials, openPlaylistInSpotify),
     setSystemFocus(true),
   ]);
 
@@ -577,10 +662,16 @@ async function executeRealityShift(payload: unknown): Promise<RealityShiftReport
   if (sonicResult.status === 'failed') errors.push(`audio: ${sonicResult.detail}`);
   if (focusResult.status === 'failed') errors.push(`focus: ${focusResult.detail}`);
 
+  const launchTargets = [...apps, ...urls];
   const launchResults: LaunchResult[] = launchOutcomes.map((outcome, index) =>
     outcome.status === 'fulfilled'
       ? outcome.value
-      : { target: String(apps[index]), status: 'failed', durationMs: 0, error: describeError(outcome.reason) },
+      : {
+          target: String(launchTargets[index]),
+          status: 'failed',
+          durationMs: 0,
+          error: describeError(outcome.reason),
+        },
   );
 
   const killResults: KillResult[] = killOutcomes.map((outcome, index) =>

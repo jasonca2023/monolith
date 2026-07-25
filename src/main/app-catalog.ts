@@ -375,3 +375,73 @@ export function findByName(catalog: CatalogEntry[], query: string): CatalogEntry
     null
   );
 }
+
+/* -------------------------------------------------------------------------- */
+/* Resolution                                                                  */
+/* -------------------------------------------------------------------------- */
+
+export interface ResolvedTargets {
+  apps: string[];
+  urls: string[];
+  processes: string[];
+  /** Names a mood asked for that nothing installed satisfies. */
+  unresolved: string[];
+}
+
+/**
+ * Turns a mood's declared intent into concrete targets for this machine:
+ * explicit paths pass through, names and categories are looked up.
+ *
+ * Kill targets resolve to CFBundleExecutable rather than the display name. The
+ * two differ often enough to matter — Teams runs as "MSTeams" — and `pkill -x`
+ * only ever matches the executable.
+ *
+ * Pure: the catalog is passed in, so the whole resolution is testable without
+ * touching the filesystem.
+ */
+export function resolveTargets(
+  purge: {
+    launch_applications: string[];
+    launch_app_names: string[];
+    launch_categories: AppCategory[];
+    launch_category_limit: number;
+    launch_urls: string[];
+    kill_background_processes: string[];
+    kill_categories: AppCategory[];
+  },
+  catalog: CatalogEntry[],
+): ResolvedTargets {
+  const apps = new Set(purge.launch_applications.map((entry) => entry.trim()).filter(Boolean));
+  const processes = new Set(
+    purge.kill_background_processes.map((entry) => entry.trim()).filter(Boolean),
+  );
+  const unresolved: string[] = [];
+
+  for (const wanted of purge.launch_app_names) {
+    const found = findByName(catalog, wanted);
+    if (found) apps.add(found.path);
+    else unresolved.push(wanted);
+  }
+
+  for (const category of purge.launch_categories) {
+    const members = inCategory(catalog, category);
+    // A limit of 0 means "everything installed"; anything else caps the set so
+    // asking for writing apps does not open eight of them.
+    const limit = purge.launch_category_limit > 0 ? purge.launch_category_limit : members.length;
+    if (members.length === 0) unresolved.push(category);
+    for (const entry of members.slice(0, limit)) apps.add(entry.path);
+  }
+
+  for (const category of purge.kill_categories) {
+    const members = inCategory(catalog, category);
+    if (members.length === 0) unresolved.push(category);
+    for (const entry of members) processes.add(entry.process);
+  }
+
+  return {
+    apps: [...apps],
+    urls: purge.launch_urls.map((entry) => entry.trim()).filter(Boolean),
+    processes: [...processes],
+    unresolved,
+  };
+}
