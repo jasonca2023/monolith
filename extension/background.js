@@ -6,7 +6,8 @@
  *
  *   AGGRESSIVE_PURGE  — snapshot every open, non-pinned tab under the profile's
  *                       id, persist it, drop a clean staging tab, then close the
- *                       whole set. Arms the distraction blockade for deep_work.
+ *                       whole set. Arms the distraction blockade when the
+ *                       profile asks for it.
  *   HYDRATE_SESSION   — rebuild that profile's snapshot tab-for-tab, clear the
  *                       storage trace, and release the blockade.
  *   RELEASE_BLOCKADE  — unconditional escape hatch for the host or the popup.
@@ -32,7 +33,10 @@ const BLANK_TAB_URL = 'chrome://newtab/';
 /** URL schemes chrome.tabs.create is permitted to recreate. */
 const RESTORABLE_SCHEME = /^(https?|file|ftp):/i;
 
-/** The profile whose purge arms the hostile-domain blockade. */
+/**
+ * Fallback only: blocking is per-mood via payload.block_distractions, and this
+ * id is consulted just for hosts that send neither that flag nor blocked_domains.
+ */
 const BLOCKADE_PROFILE_ID = 'deep_work';
 
 /** Overridable per signal via payload.blocked_domains. */

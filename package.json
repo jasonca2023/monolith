@@ -8,7 +8,8 @@
     "build:main": "tsc -p tsconfig.json",
     "build:renderer": "vite build",
     "build": "npm run build:main && npm run build:renderer",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.renderer.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "test": "tsc -p tsconfig.test.json && node --test \"dist-test/test/**/*.test.js\"",
     "start": "npm run build && electron .",
     "dev:renderer": "vite",
     "dev": "npm run build:main && node scripts/dev.mjs"

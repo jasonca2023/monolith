@@ -9,6 +9,7 @@
 
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
+import type { FocusResult, FocusStatus } from '../shared/types';
 
 const execAsync = promisify(exec);
 const COMMAND_TIMEOUT_MS = 8000;
@@ -17,13 +18,7 @@ const COMMAND_TIMEOUT_MS = 8000;
 const SHORTCUT_ON = 'Monolith Focus On';
 const SHORTCUT_OFF = 'Monolith Focus Off';
 
-export type FocusStatus = 'applied' | 'unsupported' | 'failed';
-
-export interface FocusResult {
-  status: FocusStatus;
-  detail: string;
-  durationMs: number;
-}
+export type { FocusResult, FocusStatus } from '../shared/types';
 
 function describe(error: unknown): string {
   if (error instanceof Error) return error.message.split('\n')[0] ?? error.message;

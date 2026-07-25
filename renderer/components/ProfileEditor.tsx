@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import type { BackendProfile } from "../monolith";
+import type { Profile } from "../monolith";
 import { hexToXy, rgba } from "../lib/color";
 
 const DEFAULT_BLOCKED = [
@@ -12,7 +12,7 @@ const DEFAULT_BLOCKED = [
 ];
 
 /** A blank mood, ready to fill in. */
-export function emptyProfile(): BackendProfile {
+export function emptyProfile(): Profile {
   return {
     id: `mood_${Date.now().toString(36)}`,
     name: "",
@@ -95,27 +95,27 @@ export default function ProfileEditor({
   onDelete,
   onCancel,
 }: {
-  profile: BackendProfile;
+  profile: Profile;
   isNew: boolean;
-  onSave: (next: BackendProfile) => void;
+  onSave: (next: Profile) => void;
   onDelete?: () => void;
   onCancel: () => void;
 }): React.JSX.Element {
-  const [draft, setDraft] = useState<BackendProfile>(profile);
+  const [draft, setDraft] = useState<Profile>(profile);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   const purge = draft.digital_purge;
   const physical = draft.physical_orchestration;
   const sonic = draft.sonic_layering;
 
-  const patchPurge = (patch: Partial<BackendProfile["digital_purge"]>) =>
+  const patchPurge = (patch: Partial<Profile["digital_purge"]>) =>
     setDraft((prev) => ({ ...prev, digital_purge: { ...prev.digital_purge, ...patch } }));
-  const patchPhysical = (patch: Partial<BackendProfile["physical_orchestration"]>) =>
+  const patchPhysical = (patch: Partial<Profile["physical_orchestration"]>) =>
     setDraft((prev) => ({
       ...prev,
       physical_orchestration: { ...prev.physical_orchestration, ...patch },
     }));
-  const patchSonic = (patch: Partial<BackendProfile["sonic_layering"]>) =>
+  const patchSonic = (patch: Partial<Profile["sonic_layering"]>) =>
     setDraft((prev) => ({ ...prev, sonic_layering: { ...prev.sonic_layering, ...patch } }));
 
   const pickApps = async () => {

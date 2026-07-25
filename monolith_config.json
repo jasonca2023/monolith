@@ -1,6 +1,9 @@
 {
   "user_settings": {
-    "spotify_auth_token": "OAUTH_BEARER_ACCESS_TOKEN_STRING_PROTOTYPE",
+    "spotify_auth_token": "",
+    "spotify_client_id": "",
+    "spotify_refresh_token": "",
+    "spotify_token_expires_at": 0,
     "hue_bridge_ip": "192.168.1.50",
     "hue_api_key": "AUTHORIZED_LOCAL_HUE_DEVELOPER_HASH"
   },

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
-  BackendProfile,
+  Profile,
   BridgeEvent,
   MonolithConfig,
   RealityShiftReport,
@@ -83,7 +83,7 @@ function basename(filePath: string): string {
 }
 
 /** One line describing what a mood will actually do, for the card face. */
-function summarize(profile: BackendProfile): string {
+function summarize(profile: Profile): string {
   const purge = profile.digital_purge;
   const bits: string[] = [];
   if (purge.launch_applications.length > 0) bits.push(`${purge.launch_applications.length} apps`);
@@ -109,7 +109,7 @@ export default function CommandDeck(): React.JSX.Element {
   const [logLines, setLogLines] = useState<LogLine[]>([]);
   const [showCredentials, setShowCredentials] = useState(false);
   const [credentialsDismissed, setCredentialsDismissed] = useState(false);
-  const [editing, setEditing] = useState<{ profile: BackendProfile; isNew: boolean } | null>(null);
+  const [editing, setEditing] = useState<{ profile: Profile; isNew: boolean } | null>(null);
   const logCounter = useRef(0);
   const logEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -382,7 +382,7 @@ export default function CommandDeck(): React.JSX.Element {
     void (engagedId ? handleDisengage() : handleEngage());
   }, [engagedId, handleDisengage, handleEngage]);
 
-  const handleSelect = (profile: BackendProfile) => {
+  const handleSelect = (profile: Profile) => {
     if (profile.id === activeId) return;
     setActiveId(profile.id);
     appendLog([{ tone: "success", text: `[DECK] ${profile.name} staged — ${summarize(profile)}.` }]);
@@ -393,7 +393,7 @@ export default function CommandDeck(): React.JSX.Element {
   /* ---------------------------------------------------------------------- */
 
   const persist = useCallback(
-    async (nextProfiles: BackendProfile[], note: string) => {
+    async (nextProfiles: Profile[], note: string) => {
       const api = window.monolith;
       if (!api || !config) return;
       try {
@@ -407,7 +407,7 @@ export default function CommandDeck(): React.JSX.Element {
     [appendLog, config],
   );
 
-  const handleSaveProfile = (next: BackendProfile) => {
+  const handleSaveProfile = (next: Profile) => {
     const isNew = editing?.isNew ?? false;
     const nextProfiles = isNew
       ? [...profiles, next]
@@ -777,7 +777,7 @@ function ProfileCard({
   onSelect,
   onEdit,
 }: {
-  profile: BackendProfile;
+  profile: Profile;
   isActive: boolean;
   onSelect: () => void;
   onEdit: () => void;

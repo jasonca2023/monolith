@@ -16,16 +16,43 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
-import { applyAudio, applyLighting, restoreLighting, type ActuationResult } from './actuators';
-import { setSystemFocus, type FocusResult } from './focus-mode';
+import {
+  applyAudio,
+  applyLighting,
+  isPlaceholder,
+  restoreLighting,
+  type SpotifyTokenSource,
+} from './actuators';
+import { setSystemFocus } from './focus-mode';
+import { discoverBridges, pairWithBridge } from './hue-setup';
+import { authorize, isExpired, refreshTokens, type SpotifyTokens } from './spotify-auth';
+import { isRecord, normalizeConfig, normalizeProfile } from './normalize';
+import {
+  assertKillable,
+  assertLaunchable,
+  buildKillCommand,
+  buildLaunchCommand,
+  isNotRunningExit,
+} from './safety';
 import type {
+  ActuationResult,
+  BrowserDispatchResult,
+  BrowserSignal,
   DigitalPurge,
+  DisengageReport,
+  FocusResult,
+  HueDiscoveryResult,
+  HuePairResult,
+  KillResult,
+  LaunchResult,
   MonolithConfig,
   PhysicalOrchestration,
   Profile,
+  RealityShiftReport,
   SonicLayering,
+  SpotifyAuthResult,
   UserSettings,
-} from './config-types';
+} from '../shared/types';
 
 const execAsync = promisify(exec);
 
@@ -40,110 +67,16 @@ const LAUNCH_TIMEOUT_MS = 15_000;
 const KILL_TIMEOUT_MS = 10_000;
 const CONFIG_FILENAME = 'monolith_config.json';
 
-/** Process names may only contain these characters before reaching a shell. */
-const SAFE_PROCESS_NAME = /^[A-Za-z0-9 ._-]+$/;
-
-/** cmd.exe offers no literal-quoting construct, so these are refused outright. */
-const WINDOWS_FORBIDDEN = /["%!]/;
+/* -------------------------------------------------------------------------- */
+/* Shared contract                                                             */
+/* -------------------------------------------------------------------------- */
 
 /**
- * Terminating any of these takes the desktop session or the host app with it.
- * A profile that names one is rejected rather than obeyed.
+ * The config schema and every IPC result type live in src/shared/types.ts so
+ * the renderer compiles against the same declarations. Re-exported here for
+ * callers that already import them from the main module.
  */
-const PROTECTED_PROCESSES = new Set([
-  'kernel_task',
-  'launchd',
-  'windowserver',
-  'loginwindow',
-  'systemd',
-  'init',
-  'csrss.exe',
-  'wininit.exe',
-  'winlogon.exe',
-  'services.exe',
-  'lsass.exe',
-  'explorer.exe',
-  'electron',
-  'monolith',
-  'monolith.exe',
-]);
-
-/* -------------------------------------------------------------------------- */
-/* Configuration schema                                                        */
-/* -------------------------------------------------------------------------- */
-
-export type {
-  UserSettings,
-  DigitalPurge,
-  PhysicalOrchestration,
-  SonicLayering,
-  Profile,
-  MonolithConfig,
-} from './config-types';
-
-/* -------------------------------------------------------------------------- */
-/* IPC result types                                                            */
-/* -------------------------------------------------------------------------- */
-
-export type LaunchStatus = 'launched' | 'failed';
-export type KillStatus = 'terminated' | 'not_running' | 'rejected' | 'failed';
-export type BrowserSignal = 'AGGRESSIVE_PURGE' | 'HYDRATE_SESSION';
-
-export interface LaunchResult {
-  target: string;
-  status: LaunchStatus;
-  durationMs: number;
-  command?: string;
-  error?: string;
-}
-
-export interface KillResult {
-  target: string;
-  status: KillStatus;
-  durationMs: number;
-  command?: string;
-  error?: string;
-}
-
-export interface BrowserDispatchResult {
-  signal: BrowserSignal | 'NONE';
-  ok: boolean;
-  receivers: number;
-  error?: string;
-}
-
-export interface RealityShiftReport {
-  ok: boolean;
-  profileId: string;
-  profileName: string;
-  platform: NodeJS.Platform;
-  applications: {
-    requested: number;
-    launched: number;
-    failed: number;
-    results: LaunchResult[];
-  };
-  processes: {
-    requested: number;
-    terminated: number;
-    notRunning: number;
-    failed: number;
-    results: KillResult[];
-  };
-  browser: BrowserDispatchResult;
-  physical_orchestration: PhysicalOrchestration | null;
-  sonic_layering: SonicLayering | null;
-  /** Outcome of the actual Hue call. */
-  physical_result: ActuationResult;
-  /** Outcome of the actual Spotify call. */
-  sonic_result: ActuationResult;
-  /** Outcome of the OS Do Not Disturb / Focus Assist toggle. */
-  focus_result: FocusResult;
-  startedAt: string;
-  finishedAt: string;
-  durationMs: number;
-  errors: string[];
-}
+export type * from '../shared/types';
 
 /* -------------------------------------------------------------------------- */
 /* Logging                                                                     */
@@ -172,15 +105,6 @@ function describeError(error: unknown): string {
   return typeof error === 'string' ? error : JSON.stringify(error);
 }
 
-/** No regex: keeps control-character detection independent of source encoding. */
-function hasControlCharacters(value: string): boolean {
-  for (const character of value) {
-    const code = character.codePointAt(0) ?? 0;
-    if (code < 0x20 || code === 0x7f) return true;
-  }
-  return false;
-}
-
 /* -------------------------------------------------------------------------- */
 /* Configuration store                                                         */
 /* -------------------------------------------------------------------------- */
@@ -188,6 +112,9 @@ function hasControlCharacters(value: string): boolean {
 const DEFAULT_CONFIG: MonolithConfig = {
   user_settings: {
     spotify_auth_token: '',
+    spotify_client_id: '',
+    spotify_refresh_token: '',
+    spotify_token_expires_at: 0,
     hue_bridge_ip: '',
     hue_api_key: '',
   },
@@ -261,135 +188,9 @@ class ConfigStore {
   }
 }
 
-/** Fills every field so a hand-edited config can never crash the shell. */
-function normalizeConfig(input: unknown): MonolithConfig {
-  const source = (isRecord(input) ? input : {}) as Partial<MonolithConfig>;
-  const settings = (isRecord(source.user_settings) ? source.user_settings : {}) as Partial<UserSettings>;
-
-  return {
-    user_settings: {
-      spotify_auth_token: String(settings.spotify_auth_token ?? ''),
-      hue_bridge_ip: String(settings.hue_bridge_ip ?? ''),
-      hue_api_key: String(settings.hue_api_key ?? ''),
-    },
-    profiles: Array.isArray(source.profiles) ? source.profiles.map(normalizeProfile) : [],
-  };
-}
-
-function normalizeProfile(input: unknown, index: number): Profile {
-  const source = (isRecord(input) ? input : {}) as Partial<Profile>;
-  const purge = (isRecord(source.digital_purge) ? source.digital_purge : {}) as Partial<DigitalPurge>;
-  const physical = (isRecord(source.physical_orchestration)
-    ? source.physical_orchestration
-    : {}) as Partial<PhysicalOrchestration>;
-  const sonic = (isRecord(source.sonic_layering) ? source.sonic_layering : {}) as Partial<SonicLayering>;
-
-  return {
-    id: String(source.id ?? `profile_${index}`),
-    name: String(source.name ?? `Profile ${index + 1}`),
-    builtin: Boolean(source.builtin ?? false),
-    digital_purge: {
-      close_browser_tabs: Boolean(purge.close_browser_tabs ?? false),
-      launch_applications: toStringArray(purge.launch_applications),
-      kill_background_processes: toStringArray(purge.kill_background_processes),
-      block_distractions: Boolean(purge.block_distractions ?? false),
-      blocked_domains: toStringArray(purge.blocked_domains),
-    },
-    physical_orchestration: {
-      lights_enabled: Boolean(physical.lights_enabled ?? false),
-      hex_color: String(physical.hex_color ?? '#FFFFFF'),
-      brightness: clamp(Number(physical.brightness ?? 100), 0, 100),
-      hue_xy_payload: toXyPair(physical.hue_xy_payload),
-    },
-    sonic_layering: {
-      spotify_enabled: Boolean(sonic.spotify_enabled ?? false),
-      playlist_uri: String(sonic.playlist_uri ?? ''),
-      target_frequency_profile: String(sonic.target_frequency_profile ?? ''),
-    },
-  };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function toStringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0);
-}
-
-/** CIE 1931 xy coordinates are always a two-element pair inside the gamut. */
-function toXyPair(value: unknown): [number, number] {
-  if (!Array.isArray(value) || value.length < 2) return [0.3127, 0.329];
-  return [clamp(Number(value[0]), 0, 1), clamp(Number(value[1]), 0, 1)];
-}
-
-function clamp(value: number, min: number, max: number): number {
-  if (!Number.isFinite(value)) return min;
-  return Math.min(max, Math.max(min, value));
-}
-
-/* -------------------------------------------------------------------------- */
-/* Shell quoting                                                               */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Wraps a value in POSIX single quotes. Everything inside single quotes is
- * literal to the shell, so the only escape needed is for the quote itself.
- */
-function quotePosix(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-/** Safe only because unsafe characters are rejected before this is called. */
-function quoteWindows(value: string): string {
-  return `"${value}"`;
-}
-
 /* -------------------------------------------------------------------------- */
 /* Application launcher                                                        */
 /* -------------------------------------------------------------------------- */
-
-/** Throws with a human-readable reason if `target` must not reach a shell. */
-async function assertLaunchable(target: unknown): Promise<string> {
-  if (typeof target !== 'string') {
-    throw new Error(`expected a string path, received ${typeof target}`);
-  }
-
-  const trimmed = target.trim();
-  if (trimmed.length === 0) {
-    throw new Error('path is empty');
-  }
-  if (hasControlCharacters(trimmed)) {
-    throw new Error('path contains control characters');
-  }
-  if (!path.isAbsolute(trimmed) && !/^[A-Za-z]:[\\/]/.test(trimmed)) {
-    throw new Error('path must be absolute');
-  }
-  if (process.platform === 'win32' && WINDOWS_FORBIDDEN.test(trimmed)) {
-    throw new Error('path contains characters that cannot be safely quoted for cmd.exe');
-  }
-
-  // Fail fast with a useful message instead of a silent shell error later. A
-  // cross-platform profile always carries paths for the other OS; those land
-  // here and degrade to a single skipped entry.
-  await fs.access(trimmed).catch(() => {
-    throw new Error('path does not exist on this machine');
-  });
-
-  return trimmed;
-}
-
-function buildLaunchCommand(target: string): string {
-  switch (process.platform) {
-    case 'darwin':
-      return `open ${quotePosix(target)}`;
-    case 'win32':
-      return `start "" ${quoteWindows(target)}`;
-    default:
-      return `xdg-open ${quotePosix(target)}`;
-  }
-}
 
 /**
  * Launches one application. Settles as soon as the platform opener hands off —
@@ -438,46 +239,6 @@ async function launchApplication(rawTarget: unknown): Promise<LaunchResult> {
 /* -------------------------------------------------------------------------- */
 /* Background process terminator                                               */
 /* -------------------------------------------------------------------------- */
-
-function assertKillable(name: unknown): string {
-  if (typeof name !== 'string') {
-    throw new Error(`expected a string process name, received ${typeof name}`);
-  }
-
-  const trimmed = name.trim();
-  if (trimmed.length === 0) {
-    throw new Error('process name is empty');
-  }
-  if (!SAFE_PROCESS_NAME.test(trimmed)) {
-    throw new Error('process name contains unsupported characters');
-  }
-  if (PROTECTED_PROCESSES.has(trimmed.toLowerCase())) {
-    throw new Error('process is protected and will not be terminated');
-  }
-
-  return trimmed;
-}
-
-function buildKillCommand(name: string): string {
-  if (process.platform === 'win32') {
-    const image = /\.exe$/i.test(name) ? name : `${name}.exe`;
-    return `taskkill /F /IM ${quoteWindows(image)}`;
-  }
-  // -i: case-insensitive, -x: whole-name match, so "Steam" never matches
-  // "steamwebhelper-adjacent" processes by prefix.
-  return `pkill -i -x -- ${quotePosix(name)}`;
-}
-
-/**
- * "Nothing matched" is the expected outcome for an app that simply is not
- * running, and both platforms signal it through the exit code rather than an
- * error stream: pkill exits 1, taskkill exits 128.
- */
-function isNotRunningExit(error: unknown): boolean {
-  const code = (error as { code?: unknown }).code;
-  if (process.platform === 'win32') return code === 128 || code === 1;
-  return code === 1;
-}
 
 async function killProcess(rawName: unknown): Promise<KillResult> {
   const startedAt = Date.now();
@@ -659,6 +420,83 @@ class OrchestrationBridge {
 const configStore = new ConfigStore();
 const bridge = new OrchestrationBridge();
 
+/* -------------------------------------------------------------------------- */
+/* Spotify credentials                                                         */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Owns the Spotify grant: hands out access tokens, renews them before they
+ * expire, and persists the result so a renewal survives a restart.
+ *
+ * Renewals are deduplicated through `inFlight` because a reality shift can ask
+ * for a token while a previous refresh is still running; two concurrent
+ * refreshes would race to write the config and one would win with a stale value.
+ */
+class SpotifyCredentials implements SpotifyTokenSource {
+  private inFlight: Promise<string | null> | null = null;
+
+  async getAccessToken(): Promise<string | null> {
+    const settings = (await configStore.read()).user_settings;
+
+    if (!settings.spotify_refresh_token) {
+      // No grant yet. A hand-pasted token from an older config still works
+      // until it expires, which keeps existing setups running.
+      const legacy = settings.spotify_auth_token.trim();
+      return legacy && !isPlaceholder(legacy) ? legacy : null;
+    }
+
+    if (!isExpired(settings.spotify_token_expires_at)) {
+      return settings.spotify_auth_token.trim() || this.refresh();
+    }
+
+    return this.refresh();
+  }
+
+  async refresh(): Promise<string | null> {
+    // Collapse concurrent callers onto one network round trip.
+    this.inFlight ??= this.performRefresh().finally(() => {
+      this.inFlight = null;
+    });
+    return this.inFlight;
+  }
+
+  private async performRefresh(): Promise<string | null> {
+    const config = await configStore.read();
+    const { spotify_client_id: clientId, spotify_refresh_token: refreshToken } = config.user_settings;
+
+    if (!clientId || !refreshToken) {
+      log('warn', 'sonic', 'no Spotify grant to renew — connect Spotify from the credentials panel');
+      return null;
+    }
+
+    try {
+      const tokens = await refreshTokens(clientId, refreshToken);
+      await this.persist(tokens);
+      log('info', 'sonic', 'renewed the Spotify access token');
+      return tokens.accessToken;
+    } catch (error) {
+      log('error', 'sonic', `could not renew the Spotify token: ${describeError(error)}`);
+      return null;
+    }
+  }
+
+  /** Writes tokens back through the store so the grant survives a restart. */
+  async persist(tokens: SpotifyTokens): Promise<void> {
+    const config = await configStore.read();
+    await configStore.write({
+      ...config,
+      user_settings: {
+        ...config.user_settings,
+        spotify_auth_token: tokens.accessToken,
+        spotify_refresh_token: tokens.refreshToken,
+        spotify_token_expires_at: tokens.expiresAt,
+      },
+    });
+  }
+}
+
+const spotifyCredentials = new SpotifyCredentials();
+
 /**
  * Accepts whatever the renderer has on hand: a full profile object, a profile
  * id to resolve from disk, or a bare array of application paths.
@@ -728,7 +566,7 @@ async function executeRealityShift(payload: unknown): Promise<RealityShiftReport
     Promise.allSettled(apps.map((target) => launchApplication(target))),
     Promise.allSettled(kills.map((target) => killProcess(target))),
     applyLighting(profile.physical_orchestration, settings),
-    applyAudio(profile.sonic_layering, settings),
+    applyAudio(profile.sonic_layering, spotifyCredentials),
     setSystemFocus(true),
   ]);
 
@@ -816,16 +654,6 @@ async function executeRealityShift(payload: unknown): Promise<RealityShiftReport
     durationMs,
     errors,
   };
-}
-
-export interface DisengageReport {
-  ok: boolean;
-  profileId: string;
-  focus_result: FocusResult;
-  physical_result: ActuationResult;
-  browser: BrowserDispatchResult;
-  durationMs: number;
-  errors: string[];
 }
 
 /**
@@ -1083,6 +911,82 @@ function registerIpcHandlers(): void {
       log('warn', 'shell', 'application picker failed', describeError(error));
       return [];
     }
+  });
+
+  /**
+   * The consent screen opens in the system browser, not a BrowserWindow: the
+   * user can see the real accounts.spotify.com address bar there, and their
+   * existing Spotify login is already present.
+   */
+  ipcMain.handle('spotify:authorize', async (): Promise<SpotifyAuthResult> => {
+    const config = await configStore.read();
+    const clientId = config.user_settings.spotify_client_id.trim();
+
+    if (!clientId) {
+      return { ok: false, detail: 'Add a Spotify client ID first — create an app at developer.spotify.com' };
+    }
+
+    try {
+      log('info', 'sonic', 'opening the Spotify consent screen');
+      const tokens = await authorize(clientId, (url) => shell.openExternal(url));
+      await spotifyCredentials.persist(tokens);
+      log('info', 'sonic', 'Spotify connected');
+      return { ok: true, detail: 'Spotify connected — tokens will renew automatically' };
+    } catch (error) {
+      const detail = describeError(error);
+      log('error', 'sonic', `Spotify authorization failed: ${detail}`);
+      return { ok: false, detail };
+    }
+  });
+
+  ipcMain.handle('hue:discover', async (): Promise<HueDiscoveryResult> => {
+    try {
+      const bridges = await discoverBridges();
+      log('info', 'iot', `discovery found ${bridges.length} bridge(s)`);
+      return {
+        ok: bridges.length > 0,
+        detail: bridges.length > 0 ? `Found ${bridges.length} bridge(s)` : 'No Hue bridge found on this network',
+        bridges,
+      };
+    } catch (error) {
+      const detail = describeError(error);
+      log('warn', 'iot', `discovery failed: ${detail}`);
+      return { ok: false, detail: `Discovery failed: ${detail}`, bridges: [] };
+    }
+  });
+
+  /**
+   * Blocks for the length of the bridge's link window, so the renderer shows a
+   * "press the button" prompt while this is pending.
+   */
+  ipcMain.handle('hue:pair', async (_event, ip: unknown): Promise<HuePairResult> => {
+    if (typeof ip !== 'string' || !ip.trim()) {
+      return { ok: false, status: 'failed', detail: 'No bridge address given' };
+    }
+
+    log('info', 'iot', `pairing with the bridge at ${ip} — waiting for the link button`);
+    const outcome = await pairWithBridge(ip.trim());
+
+    if (outcome.status === 'linked') {
+      const config = await configStore.read();
+      await configStore.write({
+        ...config,
+        user_settings: {
+          ...config.user_settings,
+          hue_bridge_ip: ip.trim(),
+          hue_api_key: outcome.username,
+        },
+      });
+      log('info', 'iot', 'bridge paired and key stored');
+      return { ok: true, status: 'linked', detail: 'Bridge paired — lights are ready' };
+    }
+
+    if (outcome.status === 'button-not-pressed') {
+      return { ok: false, status: 'pending', detail: 'Timed out — press the button on the bridge, then try again' };
+    }
+
+    log('warn', 'iot', `pairing failed: ${outcome.detail}`);
+    return { ok: false, status: 'failed', detail: outcome.detail };
   });
 
   ipcMain.handle('system:info', async () => ({

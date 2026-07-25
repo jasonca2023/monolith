@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // Tests compile to CommonJS alongside the sources they import. Running the
+    // .ts directly through Node's type stripping looked tidier, but that path
+    // is ESM: it cannot resolve the extensionless relative imports the main
+    // build requires, so any source module importing a sibling would fail.
+    "rootDir": ".",
+    "outDir": "dist-test",
+    "sourceMap": true
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

@@ -9,7 +9,13 @@
  * bridge or an expired token comes back as a described result, never a throw.
  */
 
-import type { PhysicalOrchestration, SonicLayering, UserSettings } from './config-types';
+import type {
+  ActuationResult,
+  ActuationStatus,
+  PhysicalOrchestration,
+  SonicLayering,
+  UserSettings,
+} from '../shared/types';
 
 const HUE_TIMEOUT_MS = 4000;
 const SPOTIFY_TIMEOUT_MS = 6000;
@@ -22,15 +28,9 @@ const PLACEHOLDERS = new Set([
   '',
 ]);
 
-export type ActuationStatus = 'applied' | 'disabled' | 'not_configured' | 'failed';
+export type { ActuationResult, ActuationStatus } from '../shared/types';
 
-export interface ActuationResult {
-  status: ActuationStatus;
-  detail: string;
-  durationMs: number;
-}
-
-function isPlaceholder(value: string | undefined): boolean {
+export function isPlaceholder(value: string | undefined): boolean {
   return value === undefined || PLACEHOLDERS.has(value.trim());
 }
 
@@ -46,7 +46,7 @@ function describe(error: unknown): string {
  * A Hue bridge lives on the LAN. Restricting the target to private ranges stops
  * a hand-edited config from pointing the app at an arbitrary internet host.
  */
-function isPrivateIpv4(candidate: string): boolean {
+export function isPrivateIpv4(candidate: string): boolean {
   // An explicit port is allowed; a Hue bridge answers on 80, but a proxied or
   // emulated bridge may not.
   const [host, port, ...rest] = candidate.trim().split(':');
@@ -76,7 +76,7 @@ function isPrivateIpv4(candidate: string): boolean {
 /* -------------------------------------------------------------------------- */
 
 /** Config carries 0–100; the Hue API wants 1–254. */
-function toHueBrightness(percent: number): number {
+export function toHueBrightness(percent: number): number {
   const clamped = Math.max(0, Math.min(100, Number.isFinite(percent) ? percent : 100));
   return Math.max(1, Math.round((clamped / 100) * 254));
 }
@@ -195,9 +195,21 @@ async function spotifyRequest(
   return { ok: false, status: response.status, detail };
 }
 
+/**
+ * Supplies access tokens and renews them. Implemented in main.ts against the
+ * config store; injected here so this module neither reads nor writes config,
+ * and so the 401-retry path can be tested without a network.
+ */
+export interface SpotifyTokenSource {
+  /** A usable token, or null when Spotify has never been connected. */
+  getAccessToken(): Promise<string | null>;
+  /** Forces a renewal after a rejection. Null when the grant is unrecoverable. */
+  refresh(): Promise<string | null>;
+}
+
 export async function applyAudio(
   directive: SonicLayering,
-  settings: UserSettings,
+  auth: SpotifyTokenSource,
 ): Promise<ActuationResult> {
   const startedAt = Date.now();
   const done = (status: ActuationStatus, detail: string): ActuationResult => ({
@@ -209,32 +221,47 @@ export async function applyAudio(
   if (!directive.spotify_enabled) {
     return done('disabled', 'spotify_enabled is false for this profile');
   }
-  if (isPlaceholder(settings.spotify_auth_token)) {
-    return done('not_configured', 'set spotify_auth_token in monolith_config.json');
-  }
   if (!directive.playlist_uri.trim()) {
     return done('not_configured', 'this profile has no playlist_uri');
   }
 
-  const token = settings.spotify_auth_token.trim();
-
   try {
-    const play = await spotifyRequest(token, '/me/player/play', {
-      method: 'PUT',
-      body: JSON.stringify({ context_uri: directive.playlist_uri }),
-    });
+    let token = await auth.getAccessToken();
+    if (!token) {
+      return done('not_configured', 'Spotify is not connected — authorize it from the credentials panel');
+    }
 
-    if (!play.ok) {
-      if (play.status === 404) {
+    const play = () =>
+      spotifyRequest(token as string, '/me/player/play', {
+        method: 'PUT',
+        body: JSON.stringify({ context_uri: directive.playlist_uri }),
+      });
+
+    let result = await play();
+
+    // An access token can expire between the pre-flight check and this call,
+    // and a token revoked from Spotify's side looks identical. One renewal and
+    // one retry covers both without looping.
+    if (!result.ok && result.status === 401) {
+      const renewed = await auth.refresh();
+      if (!renewed) {
+        return done('failed', 'Spotify rejected the token and it could not be renewed — reconnect Spotify');
+      }
+      token = renewed;
+      result = await play();
+    }
+
+    if (!result.ok) {
+      if (result.status === 404) {
         return done('failed', 'no active Spotify device — open Spotify and start playing once');
       }
-      if (play.status === 401) {
-        return done('failed', 'access token expired or invalid — refresh spotify_auth_token');
+      if (result.status === 401) {
+        return done('failed', 'Spotify rejected the renewed token — reconnect Spotify');
       }
-      if (play.status === 403) {
-        return done('failed', `Spotify refused playback (Premium required): ${play.detail}`);
+      if (result.status === 403) {
+        return done('failed', `Spotify refused playback (Premium required): ${result.detail}`);
       }
-      return done('failed', play.detail);
+      return done('failed', result.detail);
     }
 
     const label = directive.target_frequency_profile || directive.playlist_uri;
