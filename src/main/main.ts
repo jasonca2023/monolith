@@ -28,6 +28,16 @@ import { setSystemFocus } from './focus-mode';
 import { discoverApps, resolveTargets } from './app-catalog';
 import { ProcessBlockade } from './blockade';
 import { summarizeSessions, trimSessions, type SessionRecord } from './sessions';
+import {
+  fetchCloudSchedules,
+  fetchCloudSessions,
+  getAuthStatus,
+  pushSession,
+  signIn as cloudSignIn,
+  signOut as cloudSignOut,
+  signUp as cloudSignUp,
+  upsertSchedule,
+} from './cloud';
 import { MoodScheduler } from './scheduler';
 import { discoverBridges, pairWithBridge } from './hue-setup';
 import { authorize, isExpired, refreshTokens, type SpotifyTokens } from './spotify-auth';
@@ -44,6 +54,8 @@ import {
 } from './safety';
 import type {
   ActuationResult,
+  AuthResult,
+  AuthStatus,
   BrowserDispatchResult,
   BrowserSignal,
   DigitalPurge,
@@ -57,6 +69,7 @@ import type {
   PhysicalOrchestration,
   Profile,
   RealityShiftReport,
+  Schedule,
   SessionStats,
   SonicLayering,
   SpotifyAuthResult,
@@ -850,15 +863,24 @@ async function executeDisengage(profileId: unknown): Promise<DisengageReport> {
   if (currentSession) {
     const finished = currentSession;
     currentSession = null;
+    const record: SessionRecord = {
+      profileId: finished.profileId,
+      profileName: finished.profileName,
+      startedAt: new Date(finished.startedAtMs).toISOString(),
+      endedAt: new Date().toISOString(),
+      durationMs: Date.now() - finished.startedAtMs,
+      appsBlocked: sessionBlocks,
+    };
     void sessionStore
-      .append({
-        profileId: finished.profileId,
-        profileName: finished.profileName,
-        startedAt: new Date(finished.startedAtMs).toISOString(),
-        endedAt: new Date().toISOString(),
-        durationMs: Date.now() - finished.startedAtMs,
-        appsBlocked: sessionBlocks,
-      })
+      .append(record)
+      // The local file is the record of truth when signed out, and an offline
+      // cache when signed in — the cloud push is separate and its failure
+      // must not affect the (already-succeeded) local save.
+      .then(() =>
+        pushSession(app.getPath('userData'), record).catch((error) =>
+          log('warn', 'cloud', `couldn't save this session to the cloud: ${describeError(error)}`),
+        ),
+      )
       .then(() => broadcastToRenderer({ type: 'STATS_UPDATED' }));
     sessionBlocks = 0;
   }
@@ -1090,6 +1112,29 @@ const scheduler = new MoodScheduler(
   disengageFromSchedule,
   (profileId) => currentSession?.profileId === profileId,
 );
+
+/**
+ * Cloud wins for any mood it has a saved schedule for — sign-in is the one
+ * moment a schedule set on another machine should overwrite what's here.
+ * Runs at sign-in and again at boot, in case the session from last run is
+ * still valid. A mood the cloud has never seen keeps its local schedule.
+ */
+async function mergeCloudSchedules(): Promise<void> {
+  try {
+    const cloud = await fetchCloudSchedules(app.getPath('userData'));
+    if (Object.keys(cloud).length === 0) return;
+
+    const config = await configStore.read();
+    const nextProfiles = config.profiles.map((profile) =>
+      cloud[profile.id] ? { ...profile, schedule: cloud[profile.id] as Schedule } : profile,
+    );
+    await configStore.write({ ...config, profiles: nextProfiles });
+    log('info', 'cloud', `pulled ${Object.keys(cloud).length} saved schedule(s)`);
+    broadcastToRenderer({ type: 'CONFIG_UPDATED' });
+  } catch (error) {
+    log('warn', 'cloud', `couldn't pull saved schedules: ${describeError(error)}`);
+  }
+}
 
 /**
  * Rebuilt after every engage/disengage — from the tray, the hotkey, or the
@@ -1341,8 +1386,56 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.handle('stats:read', async (): Promise<SessionStats> => {
+    const status = await getAuthStatus(app.getPath('userData')).catch(() => ({ signedIn: false, email: null }));
+    if (status.signedIn) {
+      try {
+        return summarizeSessions(await fetchCloudSessions(app.getPath('userData')));
+      } catch (error) {
+        log('warn', 'cloud', `couldn't reach the cloud for stats, showing local: ${describeError(error)}`);
+      }
+    }
     return summarizeSessions(await sessionStore.read());
   });
+
+  ipcMain.handle('auth:sign-up', async (_event, email: unknown, password: unknown): Promise<AuthResult> => {
+    if (typeof email !== 'string' || typeof password !== 'string' || !email.trim() || !password) {
+      return { ok: false, detail: 'Enter an email and password.' };
+    }
+    return cloudSignUp(app.getPath('userData'), email.trim(), password);
+  });
+
+  ipcMain.handle('auth:sign-in', async (_event, email: unknown, password: unknown): Promise<AuthResult> => {
+    if (typeof email !== 'string' || typeof password !== 'string' || !email.trim() || !password) {
+      return { ok: false, detail: 'Enter an email and password.' };
+    }
+    const result = await cloudSignIn(app.getPath('userData'), email.trim(), password);
+    if (result.ok) {
+      log('info', 'cloud', 'signed in');
+      await mergeCloudSchedules();
+    }
+    return result;
+  });
+
+  ipcMain.handle('auth:sign-out', async (): Promise<void> => {
+    await cloudSignOut(app.getPath('userData'));
+    log('info', 'cloud', 'signed out');
+  });
+
+  ipcMain.handle('auth:status', async (): Promise<AuthStatus> => {
+    return getAuthStatus(app.getPath('userData')).catch(() => ({ signedIn: false, email: null }));
+  });
+
+  ipcMain.handle(
+    'schedule:sync',
+    async (_event, profileId: unknown, schedule: unknown): Promise<void> => {
+      if (typeof profileId !== 'string' || !isRecord(schedule)) return;
+      try {
+        await upsertSchedule(app.getPath('userData'), profileId, schedule as unknown as Schedule);
+      } catch (error) {
+        log('warn', 'cloud', `couldn't save the schedule to the cloud: ${describeError(error)}`);
+      }
+    },
+  );
 
   ipcMain.handle('system:info', async () => ({
     platform: process.platform,
@@ -1395,6 +1488,9 @@ if (!app.requestSingleInstanceLock()) {
       log('error', 'config', 'initial config load failed', describeError(error));
       return DEFAULT_CONFIG;
     });
+
+    // A no-op if signed out — picks back up a session persisted from last run.
+    void mergeCloudSchedules();
 
     mainWindow = createMainWindow();
     createTray();

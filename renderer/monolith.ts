@@ -11,6 +11,8 @@
 export type {
   ActuationResult,
   ActuationStatus,
+  AuthResult,
+  AuthStatus,
   BridgeEvent,
   BrowserDispatchResult,
   BrowserSignal,

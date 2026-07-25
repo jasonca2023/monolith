@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
+  AuthStatus,
   BridgeEvent,
   MonolithConfig,
   Profile,
@@ -7,6 +8,7 @@ import type {
   Schedule,
   SessionStats,
 } from "../monolith";
+import AccountModal from "./AccountModal";
 import CredentialsModal, { isUnconfigured } from "./CredentialsModal";
 import ProfileEditor, { emptyProfile } from "./ProfileEditor";
 import { mix, rgba, shade } from "../lib/color";
@@ -139,6 +141,10 @@ export default function CommandDeck(): React.JSX.Element {
   const [logLines, setLogLines] = useState<LogLine[]>([]);
   const [showActivity, setShowActivity] = useState(false);
   const [stats, setStats] = useState<SessionStats | null>(null);
+  const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
+  const [showAccount, setShowAccount] = useState(false);
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const [showCredentials, setShowCredentials] = useState(false);
   const [credentialsDismissed, setCredentialsDismissed] = useState(false);
   const [editing, setEditing] = useState<{ profile: Profile; isNew: boolean } | null>(null);
@@ -191,6 +197,11 @@ export default function CommandDeck(): React.JSX.Element {
     if (loaded) setStats(loaded);
   }, []);
 
+  const refreshAuthStatus = useCallback(async () => {
+    const status = await window.monolith?.getAuthStatus();
+    if (status) setAuthStatus(status);
+  }, []);
+
   /* ---------------------------------------------------------------------- */
   /* Boot                                                                    */
   /* ---------------------------------------------------------------------- */
@@ -226,6 +237,7 @@ export default function CommandDeck(): React.JSX.Element {
           { tone: "network", text: "Waiting for the browser to connect." },
         ]);
         void refreshStats();
+        void refreshAuthStatus();
       } catch (error) {
         if (cancelled) return;
         appendLog([{ tone: "error", text: `Couldn't load your moods: ${String(error)}` }]);
@@ -301,6 +313,11 @@ export default function CommandDeck(): React.JSX.Element {
         case "STATS_UPDATED":
           void refreshStats();
           break;
+        case "CONFIG_UPDATED":
+          // A schedule pulled from the cloud at sign-in changed profiles out
+          // from under the renderer — re-read rather than trying to patch it.
+          void api.readConfig().then((loaded) => setConfig(loaded));
+          break;
         default:
           break;
       }
@@ -310,7 +327,7 @@ export default function CommandDeck(): React.JSX.Element {
       cancelled = true;
       unsubscribe();
     };
-  }, [appendLog, refreshStats]);
+  }, [appendLog, refreshStats, refreshAuthStatus]);
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -514,6 +531,10 @@ export default function CommandDeck(): React.JSX.Element {
         const saved = await api.writeConfig({ ...config, profiles: nextProfiles });
         setConfig(saved);
         if (note) appendLog([{ tone: "success", text: note }]);
+        // A silent no-op in main when signed out — this call never needs to
+        // know whether there's an account, only that the schedule changed.
+        const updated = saved.profiles.find((p) => p.id === active.id);
+        if (updated) void api.syncSchedule(active.id, updated.schedule);
       } catch (error) {
         appendLog([{ tone: "error", text: `Couldn't save the schedule: ${String(error)}` }]);
       }
@@ -532,14 +553,55 @@ export default function CommandDeck(): React.JSX.Element {
     void persist(nextProfiles, isNew ? `${next.name} created.` : `${next.name} updated.`);
   };
 
+  /** Shared by the mood editor's Delete and the card's own inline delete. */
+  const deleteProfile = (target: Profile) => {
+    const nextProfiles = profiles.filter((profile) => profile.id !== target.id);
+    if (activeId === target.id) setActiveId(nextProfiles[0]?.id ?? null);
+    if (engagedId === target.id) setEngagedId(null);
+    void persist(nextProfiles, `${target.name} deleted.`);
+  };
+
   const handleDeleteProfile = () => {
     const target = editing?.profile;
     if (!target) return;
-
-    const nextProfiles = profiles.filter((profile) => profile.id !== target.id);
     setEditing(null);
-    if (activeId === target.id) setActiveId(nextProfiles[0]?.id ?? null);
-    void persist(nextProfiles, `${target.name} deleted.`);
+    deleteProfile(target);
+  };
+
+  /* ---------------------------------------------------------------------- */
+  /* Drag-to-reorder                                                         */
+  /* ---------------------------------------------------------------------- */
+
+  const handleDragStart = (index: number) => (event: React.DragEvent<HTMLDivElement>) => {
+    setDragIndex(index);
+    event.dataTransfer.effectAllowed = "move";
+    // Firefox won't start a drag without data being set on it.
+    event.dataTransfer.setData("text/plain", String(index));
+  };
+
+  const handleDragOver = (index: number) => (event: React.DragEvent<HTMLDivElement>) => {
+    if (dragIndex === null) return;
+    event.preventDefault();
+    if (dragOverIndex !== index) setDragOverIndex(index);
+  };
+
+  const handleDragEnd = () => {
+    setDragIndex(null);
+    setDragOverIndex(null);
+  };
+
+  const handleDrop = (index: number) => (event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    if (dragIndex !== null && dragIndex !== index) {
+      const reordered = [...profiles];
+      const [moved] = reordered.splice(dragIndex, 1);
+      if (moved) {
+        reordered.splice(index, 0, moved);
+        void persist(reordered, `${moved.name} moved to position ${index + 1}.`);
+      }
+    }
+    setDragIndex(null);
+    setDragOverIndex(null);
   };
 
   /* ---------------------------------------------------------------------- */
@@ -627,6 +689,18 @@ export default function CommandDeck(): React.JSX.Element {
         />
       )}
 
+      {showAccount && (
+        <AccountModal
+          onSignedIn={(email) => {
+            setShowAccount(false);
+            setAuthStatus({ signedIn: true, email });
+            appendLog([{ tone: "success", text: `Signed in as ${email}.` }]);
+            void refreshStats();
+          }}
+          onDismiss={() => setShowAccount(false)}
+        />
+      )}
+
       {editing && (
         <ProfileEditor
           profile={editing.profile}
@@ -642,6 +716,15 @@ export default function CommandDeck(): React.JSX.Element {
         shellReady={shellReady}
         needsCredentials={credentialsDismissed && isUnconfigured(config?.user_settings)}
         onOpenCredentials={() => setShowCredentials(true)}
+        authStatus={authStatus}
+        onOpenAccount={() => setShowAccount(true)}
+        onSignOut={() => {
+          void window.monolith?.signOut().then(() => {
+            setAuthStatus({ signedIn: false, email: null });
+            appendLog([{ tone: "success", text: "Signed out." }]);
+            void refreshStats();
+          });
+        }}
       />
 
       <div className="relative z-10 flex flex-1 flex-col overflow-hidden">
@@ -682,13 +765,20 @@ export default function CommandDeck(): React.JSX.Element {
             </div>
 
             <div className="mx-auto grid w-full max-w-4xl grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-              {profiles.map((profile) => (
+              {profiles.map((profile, index) => (
                 <ProfileCard
                   key={profile.id}
                   profile={profile}
                   isActive={profile.id === active?.id}
+                  isDragging={dragIndex === index}
+                  isDropTarget={dragOverIndex === index && dragIndex !== null && dragIndex !== index}
                   onSelect={() => handleSelect(profile)}
                   onEdit={() => setEditing({ profile, isNew: false })}
+                  onDelete={() => deleteProfile(profile)}
+                  onDragStart={handleDragStart(index)}
+                  onDragOver={handleDragOver(index)}
+                  onDragEnd={handleDragEnd}
+                  onDrop={handleDrop(index)}
                 />
               ))}
               <button
@@ -779,11 +869,17 @@ function TitleBar({
   shellReady,
   needsCredentials,
   onOpenCredentials,
+  authStatus,
+  onOpenAccount,
+  onSignOut,
 }: {
   onExitFocus?: () => void;
   shellReady: boolean | null;
   needsCredentials: boolean;
   onOpenCredentials: () => void;
+  authStatus: AuthStatus | null;
+  onOpenAccount: () => void;
+  onSignOut: () => void;
 }): React.JSX.Element {
   const api = window.monolith;
 
@@ -815,6 +911,22 @@ function TitleBar({
             className="rounded-full border border-slate-700 bg-slate-950/80 px-4 py-1.5 text-sm text-slate-300 backdrop-blur transition hover:border-slate-500 hover:text-slate-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-400"
           >
             Leave focus mode
+          </button>
+        )}
+        {authStatus?.signedIn ? (
+          <button
+            onClick={onSignOut}
+            title="Sign out"
+            className="rounded-full border border-[#242430] px-3 py-1 text-xs text-slate-400 transition hover:border-slate-500 hover:text-slate-200"
+          >
+            {authStatus.email}
+          </button>
+        ) : (
+          <button
+            onClick={onOpenAccount}
+            className="rounded-full border border-[#242430] px-3 py-1 text-xs text-slate-400 transition hover:border-slate-500 hover:text-slate-200"
+          >
+            Sign in
           </button>
         )}
         {api && (
@@ -905,56 +1017,166 @@ const NexusButton = React.forwardRef<
 function ProfileCard({
   profile,
   isActive,
+  isDragging,
+  isDropTarget,
   onSelect,
   onEdit,
+  onDelete,
+  onDragStart,
+  onDragOver,
+  onDragEnd,
+  onDrop,
 }: {
   profile: Profile;
   isActive: boolean;
+  isDragging: boolean;
+  isDropTarget: boolean;
   onSelect: () => void;
   onEdit: () => void;
+  onDelete: () => void;
+  onDragStart: (event: React.DragEvent<HTMLDivElement>) => void;
+  onDragOver: (event: React.DragEvent<HTMLDivElement>) => void;
+  onDragEnd: () => void;
+  onDrop: (event: React.DragEvent<HTMLDivElement>) => void;
 }): React.JSX.Element {
   const hex = profile.physical_orchestration.hex_color;
   const mutedHex = mix(hex, MUTE_TOWARD, MUTE_FACTOR);
   const scheduleLine = scheduleSummary(profile.schedule);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const confirmTimeoutRef = useRef<number | undefined>(undefined);
+
+  const handleDeleteClick = () => {
+    if (confirmingDelete) {
+      window.clearTimeout(confirmTimeoutRef.current);
+      onDelete();
+      return;
+    }
+    setConfirmingDelete(true);
+    confirmTimeoutRef.current = window.setTimeout(() => setConfirmingDelete(false), 3000);
+  };
 
   return (
     <div
-      className={`group relative flex min-h-[84px] flex-col justify-between gap-1 rounded-xl border p-3 transition-colors duration-300 sm:p-4 ${
-        isActive ? "" : "border-[#1e1e1e] bg-[#121218] hover:border-slate-600"
+      onDragOver={onDragOver}
+      onDrop={onDrop}
+      onClick={onSelect}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onSelect();
+        }
+      }}
+      role="button"
+      tabIndex={0}
+      aria-pressed={isActive}
+      className={`group flex min-h-[84px] cursor-pointer flex-col justify-between gap-1 rounded-xl border p-3 transition-colors duration-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-400 sm:p-4 ${
+        isDragging ? "opacity-40" : ""
+      } ${
+        isDropTarget
+          ? "border-dashed border-slate-400"
+          : isActive
+            ? ""
+            : "border-[#1e1e1e] bg-[#121218] hover:border-slate-600"
       }`}
       // Active state reads as a lighter surface, not a glow — elevation by
       // lightness rather than a coloured halo on a dark card.
-      style={isActive ? { borderColor: mutedHex, backgroundColor: rgba(mutedHex, 0.08) } : undefined}
+      style={
+        !isDropTarget && isActive
+          ? { borderColor: mutedHex, backgroundColor: rgba(mutedHex, 0.08) }
+          : undefined
+      }
     >
-      <button
-        onClick={onSelect}
-        aria-pressed={isActive}
-        className="flex flex-col items-start gap-1 pr-8 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-400"
-      >
-        <span className="flex items-center gap-2">
-          <span
-            className="h-2.5 w-2.5 shrink-0 rounded-full transition-colors duration-500"
-            style={{ backgroundColor: mutedHex }}
-          />
-          <span
-            className="font-display text-sm font-semibold sm:text-base transition-colors duration-500"
-            style={{ color: isActive ? mutedHex : undefined }}
-          >
-            {profile.name}
-          </span>
-        </span>
-        <span className="text-[11px] leading-snug text-slate-500">{summarize(profile)}</span>
-        {scheduleLine && <span className="text-[11px] leading-snug text-slate-600">{scheduleLine}</span>}
-      </button>
+      <div className="flex items-start gap-1.5">
+        <div
+          draggable
+          onDragStart={onDragStart}
+          onDragEnd={onDragEnd}
+          onClick={(event) => event.stopPropagation()}
+          role="button"
+          tabIndex={-1}
+          aria-label={`Drag to reorder ${profile.name}`}
+          title="Drag to reorder"
+          className="mt-0.5 flex h-5 w-5 shrink-0 cursor-grab items-center justify-center rounded text-slate-600 opacity-40 transition hover:text-slate-300 active:cursor-grabbing group-hover:opacity-100"
+        >
+          <svg viewBox="0 0 10 16" className="h-3 w-3" fill="currentColor">
+            <circle cx="2" cy="2" r="1.4" />
+            <circle cx="8" cy="2" r="1.4" />
+            <circle cx="2" cy="8" r="1.4" />
+            <circle cx="8" cy="8" r="1.4" />
+            <circle cx="2" cy="14" r="1.4" />
+            <circle cx="8" cy="14" r="1.4" />
+          </svg>
+        </div>
 
-      <button
-        onClick={onEdit}
-        aria-label={`Edit ${profile.name}`}
-        title={`Edit ${profile.name}`}
-        className="absolute right-2 top-2 rounded px-1.5 py-0.5 text-[10px] uppercase tracking-widest text-slate-700 opacity-0 transition hover:text-slate-300 focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-400 group-hover:opacity-100"
-      >
-        Edit
-      </button>
+        <div className="flex flex-1 flex-col items-start gap-1 text-left">
+          <span className="flex items-center gap-2">
+            <span
+              className="h-2.5 w-2.5 shrink-0 rounded-full transition-colors duration-500"
+              style={{ backgroundColor: mutedHex }}
+            />
+            <span
+              className="font-display text-sm font-semibold sm:text-base transition-colors duration-500"
+              style={{ color: isActive ? mutedHex : undefined }}
+            >
+              {profile.name}
+            </span>
+          </span>
+          <span className="text-[11px] leading-snug text-slate-500">{summarize(profile)}</span>
+          {scheduleLine && <span className="text-[11px] leading-snug text-slate-600">{scheduleLine}</span>}
+        </div>
+
+        <div className="flex shrink-0 items-center gap-1">
+          <button
+            onClick={(event) => {
+              event.stopPropagation();
+              onEdit();
+            }}
+            aria-label={`Edit ${profile.name}`}
+            title={`Edit ${profile.name}`}
+            className="flex h-6 w-6 items-center justify-center rounded-full text-slate-500 opacity-60 transition hover:bg-white/5 hover:text-slate-200 hover:opacity-100 focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-400 group-hover:opacity-100"
+          >
+            <svg
+              viewBox="0 0 16 16"
+              className="h-3.5 w-3.5"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.4"
+              strokeLinejoin="round"
+              strokeLinecap="round"
+            >
+              <path d="M11 2l3 3-8 8H3v-3l8-8z" />
+            </svg>
+          </button>
+          <button
+            onClick={(event) => {
+              event.stopPropagation();
+              handleDeleteClick();
+            }}
+            onBlur={() => setConfirmingDelete(false)}
+            aria-label={confirmingDelete ? `Confirm delete ${profile.name}` : `Delete ${profile.name}`}
+            title={confirmingDelete ? "Click again to delete for good" : `Delete ${profile.name}`}
+            className={`flex h-6 w-6 items-center justify-center rounded-full transition focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-400 ${
+              confirmingDelete
+                ? "bg-red-500/20 text-red-300 opacity-100"
+                : "text-slate-500 opacity-60 hover:bg-red-500/10 hover:text-red-300 hover:opacity-100 group-hover:opacity-100"
+            }`}
+          >
+            <svg
+              viewBox="0 0 16 16"
+              className="h-3.5 w-3.5"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.4"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M3 4h10" />
+              <path d="M6.5 4V2.5h3V4" />
+              <path d="M4.5 4l.5 9a1 1 0 001 1h4a1 1 0 001-1l.5-9" />
+            </svg>
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

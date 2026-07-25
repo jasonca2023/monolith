@@ -66,12 +66,20 @@ Chrome evicts it.
 | `dialog:pick-applications` | — | `string[]` (empty if cancelled) |
 | `spotify:authorize` | — | `SpotifyAuthResult` |
 | `hue:discover` / `hue:pair` | — / bridge IP | `HueDiscoveryResult` / `HuePairResult` |
+| `stats:read` | — | `SessionStats` (cloud if signed in, else local) |
+| `auth:sign-up` / `auth:sign-in` | email, password | `AuthResult` |
+| `auth:sign-out` / `auth:status` | — | — / `AuthStatus` |
+| `schedule:sync` | profile id, `Schedule` | — (silent no-op signed out) |
 | `system:info` | — | platform, versions, bridge URL |
 | `window:minimize` / `window:toggle-maximize` / `window:close` | — | — / `boolean` / — |
 
 `bridge:event` is pushed to the renderer whenever the extension acknowledges a
 signal (`PURGE_COMPLETE`, `HYDRATE_COMPLETE`, `BLOCKADE_RELEASED`,
-`SIGNAL_FAILED`).
+`SIGNAL_FAILED`), and also for cross-trigger sync: `EXTERNAL_ENGAGE` /
+`EXTERNAL_DISENGAGE` (tray, hotkey or schedule acted while the window was
+open), `BLOCKADE_KILL` (a blocked app got closed again), `STATS_UPDATED` and
+`CONFIG_UPDATED` (a cloud schedule pull changed a profile out from under the
+open window).
 
 **No IPC handler ever rejects.** A bad path, a missing extension, an unknown
 profile id, an unreachable Hue bridge or a corrupt config all come back as a

@@ -23,6 +23,11 @@ const api: MonolithApi = {
   discoverHueBridges: () => ipcRenderer.invoke('hue:discover'),
   pairHueBridge: (ip) => ipcRenderer.invoke('hue:pair', ip),
   readStats: () => ipcRenderer.invoke('stats:read'),
+  signUp: (email, password) => ipcRenderer.invoke('auth:sign-up', email, password),
+  signIn: (email, password) => ipcRenderer.invoke('auth:sign-in', email, password),
+  signOut: () => ipcRenderer.invoke('auth:sign-out'),
+  getAuthStatus: () => ipcRenderer.invoke('auth:status'),
+  syncSchedule: (profileId, schedule) => ipcRenderer.invoke('schedule:sync', profileId, schedule),
   onBridgeEvent: (listener) => {
     const handler = (_event: IpcRendererEvent, payload: BridgeEvent) => listener(payload);
     ipcRenderer.on('bridge:event', handler);

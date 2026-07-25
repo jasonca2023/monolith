@@ -67,6 +67,18 @@ export interface SessionStats {
   streakDays: number;
 }
 
+/** Everything else in the app works with no account; signing in only adds
+ *  cloud sync for session history and mood schedules. */
+export interface AuthResult {
+  ok: boolean;
+  detail: string;
+}
+
+export interface AuthStatus {
+  signedIn: boolean;
+  email: string | null;
+}
+
 /**
  * Categories a mood can name instead of individual apps. Resolved against what
  * is actually installed at shift time, so "quit every game" travels between
@@ -298,6 +310,13 @@ export interface MonolithApi {
   pairHueBridge(ip: string): Promise<HuePairResult>;
   /** Aggregates the user's own session history — no research citation needed. */
   readStats(): Promise<SessionStats>;
+  /** Cloud account — optional. Everything else in the app works without it. */
+  signUp(email: string, password: string): Promise<AuthResult>;
+  signIn(email: string, password: string): Promise<AuthResult>;
+  signOut(): Promise<void>;
+  getAuthStatus(): Promise<AuthStatus>;
+  /** Pushes a mood's schedule to the cloud; a silent no-op when signed out. */
+  syncSchedule(profileId: string, schedule: Schedule): Promise<void>;
   onBridgeEvent(listener: (event: BridgeEvent) => void): () => void;
   /** The shell is frameless, so the renderer owns the window controls. */
   window: {
