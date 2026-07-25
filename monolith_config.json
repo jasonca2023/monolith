@@ -1,0 +1,143 @@
+{
+  "user_settings": {
+    "spotify_auth_token": "OAUTH_BEARER_ACCESS_TOKEN_STRING_PROTOTYPE",
+    "hue_bridge_ip": "192.168.1.50",
+    "hue_api_key": "AUTHORIZED_LOCAL_HUE_DEVELOPER_HASH"
+  },
+  "profiles": [
+    {
+      "id": "deep_work",
+      "name": "Deep Work",
+      "builtin": true,
+      "digital_purge": {
+        "close_browser_tabs": true,
+        "launch_applications": [
+          "/Applications/Visual Studio Code.app",
+          "/Applications/iTerm.app",
+          "C:\\Program Files\\Git\\git-bash.exe"
+        ],
+        "kill_background_processes": [
+          "Slack",
+          "Discord",
+          "Steam",
+          "AdobeUpdateService"
+        ],
+        "block_distractions": true,
+        "blocked_domains": [
+          "twitter.com",
+          "x.com",
+          "reddit.com",
+          "youtube.com",
+          "instagram.com",
+          "tiktok.com",
+          "facebook.com",
+          "news.ycombinator.com",
+          "twitch.tv"
+        ]
+      },
+      "physical_orchestration": {
+        "lights_enabled": true,
+        "hex_color": "#0000FF",
+        "brightness": 35,
+        "hue_xy_payload": [
+          0.157,
+          0.018
+        ]
+      },
+      "sonic_layering": {
+        "spotify_enabled": true,
+        "playlist_uri": "spotify:playlist:37i9dQZF1DWWQRwui0ExPn",
+        "target_frequency_profile": "Binaural Focus Waves"
+      }
+    },
+    {
+      "id": "brain_dump",
+      "name": "Brain Dump",
+      "builtin": true,
+      "digital_purge": {
+        "close_browser_tabs": false,
+        "launch_applications": [
+          "/Applications/Figma.app"
+        ],
+        "kill_background_processes": [],
+        "block_distractions": false,
+        "blocked_domains": []
+      },
+      "physical_orchestration": {
+        "lights_enabled": true,
+        "hex_color": "#FFA500",
+        "brightness": 50,
+        "hue_xy_payload": [
+          0.526,
+          0.413
+        ]
+      },
+      "sonic_layering": {
+        "spotify_enabled": true,
+        "playlist_uri": "spotify:playlist:37i9dQZF1DWWQRwui0ExPm",
+        "target_frequency_profile": "Deep Lofi Beats"
+      }
+    },
+    {
+      "id": "high_energy",
+      "name": "High Energy",
+      "builtin": true,
+      "digital_purge": {
+        "close_browser_tabs": true,
+        "launch_applications": [
+          "/Applications/Notion.app"
+        ],
+        "kill_background_processes": [],
+        "block_distractions": true,
+        "blocked_domains": [
+          "youtube.com",
+          "netflix.com",
+          "twitch.tv"
+        ]
+      },
+      "physical_orchestration": {
+        "lights_enabled": true,
+        "hex_color": "#FF0000",
+        "brightness": 80,
+        "hue_xy_payload": [
+          0.674,
+          0.314
+        ]
+      },
+      "sonic_layering": {
+        "spotify_enabled": true,
+        "playlist_uri": "spotify:playlist:37i9dQZF1DWWQRwui0ExPl",
+        "target_frequency_profile": "High Tempo Synthwave"
+      }
+    },
+    {
+      "id": "late_night_chill",
+      "name": "Late Night Chill",
+      "builtin": true,
+      "digital_purge": {
+        "close_browser_tabs": false,
+        "launch_applications": [],
+        "kill_background_processes": [
+          "VSCode",
+          "iTerm"
+        ],
+        "block_distractions": false,
+        "blocked_domains": []
+      },
+      "physical_orchestration": {
+        "lights_enabled": true,
+        "hex_color": "#8A2BE2",
+        "brightness": 15,
+        "hue_xy_payload": [
+          0.245,
+          0.098
+        ]
+      },
+      "sonic_layering": {
+        "spotify_enabled": true,
+        "playlist_uri": "spotify:playlist:37i9dQZF1DWWQRwui0ExPk",
+        "target_frequency_profile": "Ambient Wind Down"
+      }
+    }
+  ]
+}
