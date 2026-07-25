@@ -9,7 +9,6 @@ import CredentialsModal, { isUnconfigured } from "./CredentialsModal";
 import ProfileEditor, { emptyProfile } from "./ProfileEditor";
 import { mix, rgba, shade } from "../lib/color";
 
-const WS_PORT = 8080;
 /** Neutral State — the room glows white until a mood is engaged. */
 const NEUTRAL_HEX = "#FFFFFF";
 /** Neutral gray a live accent is blended toward for the pre-engage idle look. */
@@ -35,7 +34,7 @@ const CRISIS_STATS: CrisisStat[] = [
     id: "system-overload",
     headline: "SYSTEM OVERLOAD WARNING",
     body: "Knowledge workers lose an average of 2 hours per day to workplace distractions, draining $650 Billion annually from the US Economy.",
-    source: "Speakwise Index",
+    source: "Basex, Inc. (Jonathan Spira)",
   },
   {
     id: "recovery-threshold",
@@ -111,6 +110,7 @@ export default function CommandDeck(): React.JSX.Element {
   const [waveId, setWaveId] = useState(0);
   const [isWaving, setIsWaving] = useState(false);
   const [logLines, setLogLines] = useState<LogLine[]>([]);
+  const [showActivity, setShowActivity] = useState(false);
   const [showCredentials, setShowCredentials] = useState(false);
   const [credentialsDismissed, setCredentialsDismissed] = useState(false);
   const [editing, setEditing] = useState<{ profile: Profile; isNew: boolean } | null>(null);
@@ -168,7 +168,7 @@ export default function CommandDeck(): React.JSX.Element {
       appendLog([
         {
           tone: "error",
-          text: "[SHELL] Electron bridge not detected. Open this UI through the Monolith app — a browser tab cannot launch applications.",
+          text: "Couldn't reach the Monolith app. Open this window from the Monolith app, not a browser tab.",
         },
       ]);
       return;
@@ -179,7 +179,7 @@ export default function CommandDeck(): React.JSX.Element {
 
     void (async () => {
       try {
-        const [loaded, info] = await Promise.all([api.readConfig(), api.systemInfo()]);
+        const loaded = await api.readConfig();
         if (cancelled) return;
         setConfig(loaded);
         setActiveId((current) => current ?? loaded.profiles[0]?.id ?? null);
@@ -187,16 +187,13 @@ export default function CommandDeck(): React.JSX.Element {
         appendLog([
           {
             tone: "success",
-            text: `[SHELL] Host online — ${info.platform}/${info.arch}, Electron ${info.electron}. ${loaded.profiles.length} moods loaded.`,
+            text: `Ready — ${loaded.profiles.length} mood${loaded.profiles.length === 1 ? "" : "s"} loaded.`,
           },
-          {
-            tone: "network",
-            text: `[WS:${WS_PORT}] Bridge listening on ${info.bridgeUrl}. Awaiting extension handshake.`,
-          },
+          { tone: "network", text: "Waiting for the browser to connect." },
         ]);
       } catch (error) {
         if (cancelled) return;
-        appendLog([{ tone: "error", text: `[SHELL] Config read failed: ${String(error)}` }]);
+        appendLog([{ tone: "error", text: `Couldn't load your moods: ${String(error)}` }]);
       }
     })();
 
@@ -205,45 +202,41 @@ export default function CommandDeck(): React.JSX.Element {
       switch (event.type) {
         case "EXTENSION_READY":
           setExtensionOnline(true);
-          appendLog([{ tone: "success", text: `[EXT] Service worker connected on port ${WS_PORT}.` }]);
+          appendLog([{ tone: "success", text: "Browser connected." }]);
           break;
         case "PURGE_COMPLETE": {
           setExtensionOnline(true);
           const blockade = payload.blockade as { armed?: boolean; domains?: string[] } | undefined;
+          const purged = Number(payload.purged ?? 0);
           appendLog([
-            {
-              tone: "network",
-              text: `[EXT] Purge complete — ${payload.cached ?? 0} tabs cached, ${payload.purged ?? 0} closed in ${payload.durationMs ?? 0}ms.`,
-            },
+            { tone: "network", text: `Cleared ${purged} tab${purged === 1 ? "" : "s"}.` },
             ...(blockade?.armed
               ? [
                   {
                     tone: "warn" as LogTone,
-                    text: `[EXT] Blockade armed across ${blockade.domains?.length ?? 0} sites.`,
+                    text: `Blocking ${blockade.domains?.length ?? 0} distracting site${
+                      blockade.domains?.length === 1 ? "" : "s"
+                    } for now.`,
                   },
                 ]
               : []),
           ]);
           break;
         }
-        case "HYDRATE_COMPLETE":
+        case "HYDRATE_COMPLETE": {
           setExtensionOnline(true);
+          const restored = Number(payload.restored ?? 0);
           appendLog([
-            {
-              tone: "network",
-              text: `[EXT] Session restored — ${payload.restored ?? 0} tabs rebuilt, ${payload.skipped ?? 0} skipped. Blockade released.`,
-            },
+            { tone: "network", text: `Restored ${restored} tab${restored === 1 ? "" : "s"}.` },
           ]);
           break;
+        }
         case "BLOCKADE_RELEASED":
-          appendLog([{ tone: "success", text: "[EXT] Blockade released." }]);
+          appendLog([{ tone: "success", text: "Site blocking turned off." }]);
           break;
         case "SIGNAL_FAILED":
           appendLog([
-            {
-              tone: "error",
-              text: `[EXT] ${payload.signal ?? "signal"} failed: ${payload.error ?? "unknown"}`,
-            },
+            { tone: "error", text: `Couldn't reach the browser: ${payload.error ?? "unknown error"}` },
           ]);
           break;
         default:
@@ -272,58 +265,64 @@ export default function CommandDeck(): React.JSX.Element {
     if (apps.requested > 0) {
       lines.push({
         tone: apps.failed === 0 ? "success" : "warn",
-        text: `[IPC] ${report.profileName} — ${apps.launched}/${apps.requested} apps launched in ${report.durationMs}ms.`,
+        text: `Opened ${apps.launched} of ${apps.requested} apps for ${report.profileName}.`,
       });
       for (const result of apps.results) {
         if (result.status === "failed") {
-          lines.push({ tone: "error", text: `[IPC] ${basename(result.target)} skipped: ${result.error}` });
+          lines.push({ tone: "error", text: `Couldn't open ${basename(result.target)}: ${result.error}` });
         }
       }
     }
 
     const procs = report.processes;
-    if (procs.requested > 0) {
+    if (procs.terminated > 0) {
       lines.push({
         tone: procs.failed === 0 ? "success" : "warn",
-        text: `[PROC] ${procs.terminated} quit, ${procs.notRunning} already closed, ${procs.failed} refused.`,
+        text: `Closed ${procs.terminated} app${procs.terminated === 1 ? "" : "s"}.`,
       });
-      for (const result of procs.results) {
-        if (result.status === "rejected" || result.status === "failed") {
-          lines.push({ tone: "warn", text: `[PROC] ${result.target}: ${result.error}` });
-        }
+    }
+    for (const result of procs.results) {
+      if (result.status === "rejected" || result.status === "failed") {
+        lines.push({ tone: "warn", text: `Couldn't close ${result.target}: ${result.error}` });
       }
     }
 
     lines.push(
       report.browser.ok
-        ? {
-            tone: "network",
-            text: `[WS:${WS_PORT}] ${report.browser.signal} delivered to ${report.browser.receivers} service worker${
-              report.browser.receivers === 1 ? "" : "s"
-            }.`,
-          }
-        : {
-            tone: "warn",
-            text: `[WS:${WS_PORT}] ${report.browser.signal} undelivered — ${report.browser.error}.`,
-          },
+        ? { tone: "network", text: report.browser.signal === "AGGRESSIVE_PURGE" ? "Cleared your tabs." : "Restored your tabs." }
+        : { tone: "warn", text: `Browser not connected — tabs weren't touched.` },
     );
 
     const physical = report.physical_result;
-    lines.push({
-      tone: physical.status === "failed" ? "error" : "iot",
-      text: `[IoT] Lighting ${physical.status.replace("_", " ")} — ${physical.detail}`,
-    });
+    if (physical.status !== "disabled") {
+      lines.push({
+        tone: physical.status === "failed" ? "error" : "iot",
+        text:
+          physical.status === "applied"
+            ? "Lights set."
+            : physical.status === "not_configured"
+              ? "Lights aren't connected yet."
+              : `Couldn't reach your lights: ${physical.detail}`,
+      });
+    }
 
     const sonic = report.sonic_result;
-    lines.push({
-      tone: sonic.status === "failed" ? "error" : "sonic",
-      text: `[SONIC] Playback ${sonic.status.replace("_", " ")} — ${sonic.detail}`,
-    });
+    if (sonic.status !== "disabled") {
+      lines.push({
+        tone: sonic.status === "failed" ? "error" : "sonic",
+        text:
+          sonic.status === "applied"
+            ? sonic.detail
+            : sonic.status === "not_configured"
+              ? "Music isn't connected yet."
+              : `Couldn't start music: ${sonic.detail}`,
+      });
+    }
 
     const focus = report.focus_result;
     lines.push({
       tone: focus.status === "applied" ? "success" : "warn",
-      text: `[OS] Focus filter ${focus.status} — ${focus.detail}`,
+      text: focus.status === "applied" ? "Do Not Disturb turned on." : focus.detail,
     });
 
     return lines;
@@ -353,14 +352,14 @@ export default function CommandDeck(): React.JSX.Element {
 
     setBusy(true);
     startWave("expand");
-    appendLog([{ tone: "network", text: `[IPC] execute-reality-shift → "${active.id}"` }]);
+    appendLog([{ tone: "network", text: `Starting ${active.name}…` }]);
 
     try {
       const report = await api.executeRealityShift(active.id);
       appendLog(reportToLog(report));
       setEngagedId(active.id);
     } catch (error) {
-      appendLog([{ tone: "error", text: `[IPC] Shift failed: ${String(error)}` }]);
+      appendLog([{ tone: "error", text: `Couldn't start ${active.name}: ${String(error)}` }]);
     } finally {
       setBusy(false);
     }
@@ -377,33 +376,28 @@ export default function CommandDeck(): React.JSX.Element {
 
     setBusy(true);
     startWave("collapse");
-    appendLog([{ tone: "network", text: `[IPC] execute-disengage → "${target}"` }]);
+    appendLog([{ tone: "network", text: "Returning to neutral…" }]);
 
     try {
       const report = await api.executeDisengage(target);
       appendLog([
         {
           tone: report.focus_result.status === "applied" ? "success" : "warn",
-          text: `[OS] Focus filter ${report.focus_result.status} — ${report.focus_result.detail}`,
+          text: report.focus_result.status === "applied" ? "Do Not Disturb turned off." : report.focus_result.detail,
         },
         {
           tone: report.physical_result.status === "failed" ? "error" : "iot",
-          text: `[IoT] Neutral white ${report.physical_result.status.replace("_", " ")} — ${report.physical_result.detail}`,
+          text:
+            report.physical_result.status === "failed"
+              ? `Couldn't reset your lights: ${report.physical_result.detail}`
+              : "Lights back to neutral white.",
         },
         report.browser.ok
-          ? {
-              tone: "network" as LogTone,
-              text: `[WS:${WS_PORT}] HYDRATE_SESSION delivered to ${report.browser.receivers} service worker${
-                report.browser.receivers === 1 ? "" : "s"
-              }.`,
-            }
-          : {
-              tone: "warn" as LogTone,
-              text: `[WS:${WS_PORT}] HYDRATE_SESSION undelivered — ${report.browser.error}.`,
-            },
+          ? { tone: "network" as LogTone, text: "Restored your tabs." }
+          : { tone: "warn" as LogTone, text: "Browser not connected — tabs weren't touched." },
       ]);
     } catch (error) {
-      appendLog([{ tone: "error", text: `[IPC] Disengage failed: ${String(error)}` }]);
+      appendLog([{ tone: "error", text: `Couldn't return to neutral: ${String(error)}` }]);
     } finally {
       setEngagedId(null);
       setBusy(false);
@@ -418,7 +412,7 @@ export default function CommandDeck(): React.JSX.Element {
   const handleSelect = (profile: Profile) => {
     if (profile.id === activeId) return;
     setActiveId(profile.id);
-    appendLog([{ tone: "success", text: `[DECK] ${profile.name} staged — ${summarize(profile)}.` }]);
+    appendLog([{ tone: "success", text: `${profile.name} staged — ${summarize(profile)}.` }]);
   };
 
   /* ---------------------------------------------------------------------- */
@@ -432,9 +426,9 @@ export default function CommandDeck(): React.JSX.Element {
       try {
         const saved = await api.writeConfig({ ...config, profiles: nextProfiles });
         setConfig(saved);
-        appendLog([{ tone: "success", text: `[DECK] ${note}` }]);
+        appendLog([{ tone: "success", text: note }]);
       } catch (error) {
-        appendLog([{ tone: "error", text: `[DECK] Could not save moods: ${String(error)}` }]);
+        appendLog([{ tone: "error", text: `Couldn't save your moods: ${String(error)}` }]);
       }
     },
     [appendLog, config],
@@ -472,11 +466,11 @@ export default function CommandDeck(): React.JSX.Element {
     { label: "Ambient Strip", hex: shade(baseHex, 0.35) },
   ];
   const binaries = (active?.digital_purge.launch_applications ?? []).map(basename);
-  const bridgeIp = config?.user_settings.hue_bridge_ip || "bridge unset";
+  const bridgeIp = config?.user_settings.hue_bridge_ip?.trim() || "";
   const sonicProfile = active?.sonic_layering.target_frequency_profile || "—";
 
   return (
-    <div className="relative flex h-screen w-full flex-col overflow-hidden bg-black text-slate-100">
+    <div className="relative flex h-screen w-full flex-col overflow-hidden bg-[#050608] text-slate-100">
       <style>{`
         @keyframes nexus-pulse {
           0%, 100% { box-shadow: 0 0 0 0 var(--nexus-glow), 0 0 40px 8px var(--nexus-glow-soft); }
@@ -534,16 +528,13 @@ export default function CommandDeck(): React.JSX.Element {
           onSaved={(next) => {
             setConfig(next);
             setShowCredentials(false);
-            appendLog([{ tone: "success", text: "[SHELL] Credentials saved." }]);
+            appendLog([{ tone: "success", text: "Room connected." }]);
           }}
           onDismiss={() => {
             setShowCredentials(false);
             setCredentialsDismissed(true);
             appendLog([
-              {
-                tone: "warn",
-                text: "[SHELL] Running without credentials — apps and tabs only, no lights or music.",
-              },
+              { tone: "warn", text: "Apps and tabs are ready — lights and music aren't connected yet." },
             ]);
           }}
         />
@@ -562,7 +553,6 @@ export default function CommandDeck(): React.JSX.Element {
       <TitleBar
         onExitFocus={focusMode ? () => void handleDisengage() : undefined}
         shellReady={shellReady}
-        extensionOnline={extensionOnline}
         needsCredentials={credentialsDismissed && isUnconfigured(config?.user_settings)}
         onOpenCredentials={() => setShowCredentials(true)}
       />
@@ -579,7 +569,7 @@ export default function CommandDeck(): React.JSX.Element {
               onClick={handleNexusTrigger}
               large
             />
-            <p className="text-sm uppercase tracking-[0.4em]" style={{ color: accent }}>
+            <p className="font-display text-base tracking-wide" style={{ color: accent }}>
               {active?.name ?? "Engaged"}
             </p>
           </div>
@@ -623,32 +613,37 @@ export default function CommandDeck(): React.JSX.Element {
               </button>
             </div>
 
-            <div className="mx-auto w-full max-w-4xl">
-              <RoomSimulator
-                accentSoft={accentMutedSoft}
-                lights={lights}
-                binaries={binaries}
-                bridgeIp={bridgeIp}
-                sonicProfile={sonicProfile}
-                brightness={active?.physical_orchestration.brightness ?? 0}
-                engaged={focusMode}
-              />
-            </div>
-
-            <div className="mx-auto w-full max-w-4xl pb-2">
-              <StatsTerminal />
+            <div className="mx-auto grid w-full max-w-6xl gap-4 pb-2 lg:grid-cols-5">
+              <div className="lg:col-span-3">
+                <RoomSimulator
+                  accentSoft={accentMutedSoft}
+                  lights={lights}
+                  binaries={binaries}
+                  bridgeIp={bridgeIp}
+                  sonicProfile={sonicProfile}
+                  brightness={active?.physical_orchestration.brightness ?? 0}
+                  engaged={focusMode}
+                />
+              </div>
+              <div className="lg:col-span-2">
+                <StatsTerminal />
+              </div>
             </div>
           </div>
         )}
 
         {!focusMode && (
-          <div className="z-10 border-t border-slate-800 bg-[#0a0a0a] px-4 py-3 sm:px-6">
-            <div className="mb-2 flex items-center justify-between">
-              <span className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-500">
-                Monolith Deployment Log
-              </span>
+          <div className="z-10 border-t border-slate-800 bg-[#0a0a0f] px-4 py-2.5 sm:px-6">
+            <div className="flex items-center justify-between">
+              <button
+                onClick={() => setShowActivity((visible) => !visible)}
+                className="text-xs text-slate-500 transition hover:text-slate-300"
+                aria-expanded={showActivity}
+              >
+                {showActivity ? "Hide activity" : "Show activity"}
+              </button>
               <span
-                className={`flex items-center gap-1.5 text-[11px] ${
+                className={`flex items-center gap-1.5 text-xs ${
                   extensionOnline ? "text-emerald-500" : "text-slate-500"
                 }`}
               >
@@ -657,22 +652,20 @@ export default function CommandDeck(): React.JSX.Element {
                     extensionOnline ? "bg-emerald-500" : "bg-slate-600"
                   }`}
                 />
-                {extensionOnline ? "EXTENSION LIVE" : "HOST ONLY"}
+                {extensionOnline ? "Browser connected" : "Browser not connected"}
               </span>
             </div>
-            <div className="command-deck-scroll h-28 overflow-y-auto rounded-lg border border-slate-800 bg-black/60 p-3 font-mono text-[11px] leading-relaxed sm:h-32 sm:text-xs">
-              {logLines.map((line) => (
-                <div key={line.id} className="flex gap-2">
-                  <span className="shrink-0 text-slate-600">{line.time}</span>
-                  <span className={LOG_TONE_CLASS[line.tone]}>{line.text}</span>
-                </div>
-              ))}
-              <div className="flex gap-2 text-slate-500">
-                <span>&gt;</span>
-                <span className="terminal-cursor">_</span>
+            {showActivity && (
+              <div className="command-deck-scroll mt-2 h-28 overflow-y-auto rounded-lg border border-slate-800 bg-black/60 p-3 text-xs leading-relaxed sm:h-32">
+                {logLines.map((line) => (
+                  <div key={line.id} className="flex gap-2">
+                    <span className="shrink-0 font-mono text-[11px] text-slate-600">{line.time}</span>
+                    <span className={LOG_TONE_CLASS[line.tone]}>{line.text}</span>
+                  </div>
+                ))}
+                <div ref={logEndRef} />
               </div>
-              <div ref={logEndRef} />
-            </div>
+            )}
           </div>
         )}
       </div>
@@ -687,13 +680,11 @@ export default function CommandDeck(): React.JSX.Element {
 function TitleBar({
   onExitFocus,
   shellReady,
-  extensionOnline,
   needsCredentials,
   onOpenCredentials,
 }: {
   onExitFocus?: () => void;
   shellReady: boolean | null;
-  extensionOnline: boolean;
   needsCredentials: boolean;
   onOpenCredentials: () => void;
 }): React.JSX.Element {
@@ -702,17 +693,12 @@ function TitleBar({
   return (
     <header className="app-drag relative z-40 flex h-11 shrink-0 items-center justify-between px-4 sm:px-6">
       <div className="flex items-center gap-3">
-        <span className="text-[11px] font-semibold uppercase tracking-[0.35em] text-slate-600">
-          MONOLITH
+        <span className="font-display text-sm font-semibold tracking-wide text-slate-300">
+          Monolith
         </span>
         {shellReady === false && (
           <span className="rounded-full border border-red-500/40 px-2 py-0.5 text-[10px] uppercase tracking-widest text-red-400">
-            Shell offline
-          </span>
-        )}
-        {shellReady === true && !extensionOnline && (
-          <span className="rounded-full border border-slate-700 px-2 py-0.5 text-[10px] uppercase tracking-widest text-slate-500">
-            No extension
+            Can't connect
           </span>
         )}
       </div>
@@ -721,17 +707,17 @@ function TitleBar({
         {needsCredentials && (
           <button
             onClick={onOpenCredentials}
-            className="rounded-full border border-indigo-500/40 px-3 py-1 text-[10px] uppercase tracking-widest text-indigo-300 transition hover:border-indigo-400 hover:text-indigo-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-300"
+            className="rounded-full border border-indigo-500/40 px-3 py-1 text-xs font-medium text-indigo-300 transition hover:border-indigo-400 hover:text-indigo-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-300"
           >
-            Connect lights &amp; music
+            Connect your room
           </button>
         )}
         {onExitFocus && (
           <button
             onClick={onExitFocus}
-            className="rounded-full border border-slate-700 bg-slate-950/80 px-4 py-1.5 text-xs uppercase tracking-widest text-slate-400 backdrop-blur transition hover:border-slate-500 hover:text-slate-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-400"
+            className="rounded-full border border-slate-700 bg-slate-950/80 px-4 py-1.5 text-sm text-slate-300 backdrop-blur transition hover:border-slate-500 hover:text-slate-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-400"
           >
-            Exit focus &amp; restore tabs
+            Leave focus mode
           </button>
         )}
         {api && (
@@ -795,7 +781,7 @@ const NexusButton = React.forwardRef<
       onClick={onClick}
       disabled={disabled}
       aria-busy={busy}
-      className={`nexus-pulse group relative flex items-center justify-center rounded-full border-2 bg-gradient-to-b from-[#1e1e1e] to-black transition-all duration-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 ${
+      className={`nexus-pulse group relative flex items-center justify-center rounded-full border-2 bg-gradient-to-b from-[#1e1e1e] to-[#050608] transition-[border-color,transform] duration-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 ${
         large ? "h-56 w-56 sm:h-72 sm:w-72" : "h-40 w-40 sm:h-52 sm:w-52"
       }`}
       style={
@@ -808,8 +794,8 @@ const NexusButton = React.forwardRef<
       }
     >
       <span
-        className={`text-center font-bold uppercase tracking-[0.35em] transition-colors duration-500 ${
-          large ? "text-lg sm:text-xl" : "text-sm sm:text-base"
+        className={`font-display text-center font-semibold tracking-wide transition-colors duration-500 ${
+          large ? "text-xl sm:text-2xl" : "text-base sm:text-lg"
         }`}
         style={{ color: accent }}
       >
@@ -835,10 +821,12 @@ function ProfileCard({
 
   return (
     <div
-      className={`group relative flex min-h-[84px] flex-col justify-between gap-1 rounded-xl border bg-[#121212] p-3 transition-all duration-300 sm:p-4 ${
-        isActive ? "" : "border-[#1e1e1e] hover:border-slate-600"
+      className={`group relative flex min-h-[84px] flex-col justify-between gap-1 rounded-xl border p-3 transition-colors duration-300 sm:p-4 ${
+        isActive ? "" : "border-[#1e1e1e] bg-[#121218] hover:border-slate-600"
       }`}
-      style={isActive ? { borderColor: mutedHex, boxShadow: `0 0 25px ${rgba(mutedHex, 0.35)}` } : undefined}
+      // Active state reads as a lighter surface, not a glow — elevation by
+      // lightness rather than a coloured halo on a dark card.
+      style={isActive ? { borderColor: mutedHex, backgroundColor: rgba(mutedHex, 0.08) } : undefined}
     >
       <button
         onClick={onSelect}
@@ -848,10 +836,10 @@ function ProfileCard({
         <span className="flex items-center gap-2">
           <span
             className="h-2.5 w-2.5 shrink-0 rounded-full transition-colors duration-500"
-            style={{ backgroundColor: mutedHex, boxShadow: `0 0 8px ${rgba(mutedHex, 0.7)}` }}
+            style={{ backgroundColor: mutedHex }}
           />
           <span
-            className="text-sm font-semibold sm:text-base transition-colors duration-500"
+            className="font-display text-sm font-semibold sm:text-base transition-colors duration-500"
             style={{ color: isActive ? mutedHex : undefined }}
           >
             {profile.name}
@@ -872,28 +860,18 @@ function ProfileCard({
   );
 }
 
-/**
- * The Context Crisis Telemetry panel: the research that motivates the app,
- * rendered as terminal output so it reads as instrumentation rather than
- * marketing copy.
- */
+/** The research that motivates the app, framed as short, sourced facts. */
 function StatsTerminal(): React.JSX.Element {
   return (
-    <aside className="flex flex-col overflow-hidden rounded-2xl border border-[#1e1e1e] bg-[#0a0a0a]">
-      <div className="flex items-center gap-2 border-b border-[#1e1e1e] px-4 py-3">
-        <span className="h-2.5 w-2.5 rounded-full bg-red-500/70" />
-        <span className="h-2.5 w-2.5 rounded-full bg-amber-500/70" />
-        <span className="h-2.5 w-2.5 rounded-full bg-emerald-500/70" />
-        <span className="ml-2 text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-500">
-          Context Crisis Telemetry
-        </span>
+    <aside className="flex flex-col overflow-hidden rounded-2xl border border-[#1e1e1e] bg-[#0a0a0f]">
+      <div className="border-b border-[#1e1e1e] px-4 py-3">
+        <span className="text-xs font-medium text-slate-400">Why this matters</span>
       </div>
-      <div className="command-deck-scroll grid gap-4 px-4 py-4 font-mono text-[11px] leading-relaxed sm:grid-cols-2">
+      <div className="command-deck-scroll flex max-h-72 flex-col gap-4 overflow-y-auto px-4 py-4 text-sm leading-relaxed lg:max-h-none">
         {CRISIS_STATS.map((stat) => (
           <div key={stat.id} className="border-l-2 border-red-500/40 pl-3">
-            <p className="font-semibold uppercase tracking-wide text-red-400">{stat.headline}:</p>
-            <p className="mt-1 text-slate-300">{stat.body}</p>
-            <p className="mt-1 text-slate-600">(Source: {stat.source})</p>
+            <p className="text-slate-200">{stat.body}</p>
+            <p className="mt-1 text-xs text-slate-600">{stat.source}</p>
           </div>
         ))}
       </div>
@@ -919,14 +897,10 @@ function RoomSimulator({
   engaged: boolean;
 }): React.JSX.Element {
   return (
-    <section className="rounded-2xl border border-[#1e1e1e] bg-[#121212]/60 p-4 sm:p-6">
+    <section className="rounded-2xl border border-[#1e1e1e] bg-[#121218]/60 p-4 sm:p-6">
       <div className="mb-4 flex items-baseline justify-between gap-3">
-        <h2 className="text-xs uppercase tracking-[0.3em] text-slate-500">
-          Virtual Space Environment Simulator
-        </h2>
-        <span className="text-[10px] uppercase tracking-widest text-slate-600">
-          {engaged ? "Engaged" : "Neutral"}
-        </span>
+        <h2 className="text-sm font-medium text-slate-300">Room preview</h2>
+        <span className="text-xs text-slate-600">{engaged ? "Engaged" : "Neutral"}</span>
       </div>
       <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
         <svg
@@ -941,7 +915,7 @@ function RoomSimulator({
               <stop offset="100%" stopColor="transparent" />
             </radialGradient>
           </defs>
-          <rect width="320" height="200" fill="#050505" />
+          <rect width="320" height="200" fill="#05050a" />
           <rect width="320" height="200" fill="url(#ambientGlow)" style={{ transition: "fill 500ms ease" }} />
           <rect x="40" y="140" width="240" height="10" rx="2" fill="#1e293b" />
           <rect x="50" y="150" width="8" height="30" fill="#111827" />
@@ -989,14 +963,14 @@ function RoomSimulator({
               <div className="flex items-center gap-2">
                 <span
                   className="h-4 w-4 rounded-full border border-[#1e1e1e] transition-colors duration-500"
-                  style={{ backgroundColor: zone.hex, boxShadow: `0 0 10px ${zone.hex}` }}
+                  style={{ backgroundColor: zone.hex }}
                 />
                 <code className="text-[11px] text-slate-500">{zone.hex}</code>
               </div>
             </div>
           ))}
-          <div className="mt-2 rounded-lg border border-[#1e1e1e] bg-black/40 px-3 py-2 text-[11px] text-slate-500">
-            Hue bridge {bridgeIp} · {brightness}% · {sonicProfile}
+          <div className="mt-2 rounded-lg border border-[#1e1e1e] bg-black/40 px-3 py-2 text-xs text-slate-500">
+            {bridgeIp ? `Lights connected · ${brightness}% · ${sonicProfile}` : "Lights not connected yet"}
           </div>
           <div className="flex flex-wrap gap-2">
             {binaries.length > 0 ? (

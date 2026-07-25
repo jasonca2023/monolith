@@ -1,3 +1,17 @@
+/*
+ * Self-hosted, not linked from a CDN — the shell's CSP is default-src 'self',
+ * and a desktop app needs its brand identity intact with no network at all.
+ */
+@import "@fontsource/ibm-plex-sans/400.css";
+@import "@fontsource/ibm-plex-sans/500.css";
+@import "@fontsource/ibm-plex-sans/600.css";
+@import "@fontsource/ibm-plex-sans/700.css";
+@import "@fontsource/space-grotesk/500.css";
+@import "@fontsource/space-grotesk/600.css";
+@import "@fontsource/space-grotesk/700.css";
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/500.css";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -10,7 +24,8 @@ body,
 
 body {
   margin: 0;
-  background: #000;
+  /* A hair off literal black — enough to read as designed rather than default. */
+  background: #050608;
   overscroll-behavior: none;
 }
 

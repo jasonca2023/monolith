@@ -51,6 +51,17 @@ const fromLines = (text: string) =>
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
 
+/**
+ * People copy the normal share link from Spotify ("Copy link to playlist"),
+ * not the spotify:playlist:… form the API wants — asking them to know the
+ * difference is exactly the kind of raw-protocol detail a real app hides.
+ */
+function normalizeSpotifyLink(value: string): string {
+  const trimmed = value.trim();
+  const match = /open\.spotify\.com\/(playlist|album|track)\/([A-Za-z0-9]+)/.exec(trimmed);
+  return match ? `spotify:${match[1]}:${match[2]}` : trimmed;
+}
+
 function Section({
   title,
   caption,
@@ -62,8 +73,8 @@ function Section({
 }): React.JSX.Element {
   return (
     <section className="border-t border-[#1b1b22] pt-5">
-      <h3 className="text-xs font-semibold uppercase tracking-[0.25em] text-slate-400">{title}</h3>
-      <p className="mb-3 mt-1 text-[11px] leading-relaxed text-slate-600">{caption}</p>
+      <h3 className="text-sm font-medium text-slate-300">{title}</h3>
+      <p className="mb-3 mt-1 text-xs leading-relaxed text-slate-500">{caption}</p>
       <div className="flex flex-col gap-3">{children}</div>
     </section>
   );
@@ -92,7 +103,7 @@ function Toggle({
 }
 
 const inputClass =
-  "w-full rounded-lg border border-[#242430] bg-black/60 px-3 py-2 font-mono text-[13px] text-slate-200 outline-none transition focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400/40";
+  "w-full rounded-lg border border-[#242430] bg-black/60 px-3 py-2 text-sm text-slate-200 outline-none transition focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400/40";
 
 export default function ProfileEditor({
   profile,
@@ -163,7 +174,7 @@ export default function ProfileEditor({
               {isNew ? "New mood" : `Edit ${profile.name}`}
             </h2>
             <p className="mt-1 text-sm text-slate-500">
-              Everything here fires the moment you press Engage.
+              Everything here happens the moment you press Engage.
             </p>
           </div>
           <span
@@ -174,7 +185,7 @@ export default function ProfileEditor({
 
         <div className="mt-6 flex flex-col gap-5">
           <label className="flex flex-col gap-1.5">
-            <span className="text-xs font-medium uppercase tracking-widest text-slate-500">Name</span>
+            <span className="text-xs font-medium text-slate-500">Name</span>
             <input
               value={draft.name}
               placeholder="Late night writing"
@@ -183,25 +194,26 @@ export default function ProfileEditor({
             />
           </label>
 
-          <Section title="Apps" caption="Launched when this mood engages. Full paths.">
-            <textarea
-              rows={3}
-              value={toLines(purge.launch_applications)}
-              placeholder="/Applications/Visual Studio Code.app"
-              onChange={(event) => patchPurge({ launch_applications: fromLines(event.target.value) })}
-              className={`${inputClass} resize-y`}
-            />
+          <Section title="Apps to open" caption="Launched the moment this mood starts.">
             <button
               onClick={() => void pickApps()}
-              className="self-start rounded-full border border-[#242430] px-3 py-1.5 text-[11px] uppercase tracking-widest text-slate-400 transition hover:border-slate-500 hover:text-slate-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-400"
+              className="self-start rounded-full bg-slate-100 px-4 py-2 text-sm font-medium text-slate-900 transition hover:bg-white"
             >
-              Choose apps…
+              Add apps…
             </button>
+            {purge.launch_applications.length > 0 && (
+              <textarea
+                rows={2}
+                value={toLines(purge.launch_applications)}
+                onChange={(event) => patchPurge({ launch_applications: fromLines(event.target.value) })}
+                className={`${inputClass} resize-y`}
+              />
+            )}
           </Section>
 
           <Section
-            title="Quit"
-            caption="Apps closed to clear the decks. Use the exact process name — iTerm2, not iTerm."
+            title="Apps to close"
+            caption="Closed to clear the decks. Type each app's name as it shows up when it's running — some apps go by a different name than their icon (iTerm shows up as “iTerm2”, for example)."
           >
             <textarea
               rows={2}
@@ -212,18 +224,23 @@ export default function ProfileEditor({
               }
               className={`${inputClass} resize-y`}
             />
+            <Toggle
+              checked={purge.force_quit}
+              onChange={(next) => patchPurge({ force_quit: next })}
+              label="Quit right away, even if something's unsaved"
+            />
           </Section>
 
-          <Section title="Browser" caption="Requires the Monolith Chrome extension.">
+          <Section title="Browser" caption="Needs the Monolith browser extension turned on.">
             <Toggle
               checked={purge.close_browser_tabs}
               onChange={(next) => patchPurge({ close_browser_tabs: next })}
-              label="Bank and close open tabs (restored on disengage)"
+              label="Clear open tabs (they come back when you leave this mood)"
             />
             <Toggle
               checked={purge.block_distractions}
               onChange={(next) => patchPurge({ block_distractions: next })}
-              label="Block distracting sites while engaged"
+              label="Block distracting sites while this mood is on"
             />
             {purge.block_distractions && (
               <>
@@ -236,7 +253,7 @@ export default function ProfileEditor({
                 />
                 <button
                   onClick={() => patchPurge({ blocked_domains: DEFAULT_BLOCKED })}
-                  className="self-start text-[11px] uppercase tracking-widest text-slate-600 transition hover:text-slate-400"
+                  className="self-start text-xs text-slate-500 underline decoration-slate-700 underline-offset-2 transition hover:text-slate-300"
                 >
                   Use the usual suspects
                 </button>
@@ -244,11 +261,11 @@ export default function ProfileEditor({
             )}
           </Section>
 
-          <Section title="Lights" caption="Philips Hue. The colour drives the room simulation too.">
+          <Section title="Lights" caption="Needs a Philips Hue bridge. The colour also drives the room preview.">
             <Toggle
               checked={physical.lights_enabled}
               onChange={(next) => patchPhysical({ lights_enabled: next })}
-              label="Set lights for this mood"
+              label="Set the lights for this mood"
             />
             {physical.lights_enabled && (
               <div className="flex flex-wrap items-center gap-4">
@@ -259,7 +276,7 @@ export default function ProfileEditor({
                   onChange={(event) => patchPhysical({ hex_color: event.target.value.toUpperCase() })}
                   className="h-9 w-16 cursor-pointer rounded border border-[#242430] bg-transparent"
                 />
-                <label className="flex flex-1 items-center gap-3 text-[11px] uppercase tracking-widest text-slate-500">
+                <label className="flex flex-1 items-center gap-3 text-xs text-slate-500">
                   Brightness
                   <input
                     type="range"
@@ -269,13 +286,13 @@ export default function ProfileEditor({
                     onChange={(event) => patchPhysical({ brightness: Number(event.target.value) })}
                     className="flex-1 accent-indigo-500"
                   />
-                  <span className="w-9 text-right font-mono text-slate-300">{physical.brightness}%</span>
+                  <span className="w-9 text-right text-slate-300">{physical.brightness}%</span>
                 </label>
               </div>
             )}
           </Section>
 
-          <Section title="Sound" caption="Spotify Premium, with a device already playing.">
+          <Section title="Music" caption="Needs Spotify Premium and the app already open on a device.">
             <Toggle
               checked={sonic.spotify_enabled}
               onChange={(next) => patchSonic({ spotify_enabled: next })}
@@ -283,18 +300,24 @@ export default function ProfileEditor({
             />
             {sonic.spotify_enabled && (
               <>
-                <input
-                  value={sonic.playlist_uri}
-                  placeholder="spotify:playlist:37i9dQZF1DWWQRwui0ExPn"
-                  onChange={(event) => patchSonic({ playlist_uri: event.target.value.trim() })}
-                  className={inputClass}
-                />
-                <input
-                  value={sonic.target_frequency_profile}
-                  placeholder="What to call it in the log — Binaural Focus Waves"
-                  onChange={(event) => patchSonic({ target_frequency_profile: event.target.value })}
-                  className={inputClass}
-                />
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-slate-500">Playlist link</span>
+                  <input
+                    value={sonic.playlist_uri}
+                    placeholder="Paste a playlist link from Spotify's Share button"
+                    onChange={(event) => patchSonic({ playlist_uri: normalizeSpotifyLink(event.target.value) })}
+                    className={inputClass}
+                  />
+                </label>
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs text-slate-500">What to call it</span>
+                  <input
+                    value={sonic.target_frequency_profile}
+                    placeholder="Focus playlist"
+                    onChange={(event) => patchSonic({ target_frequency_profile: event.target.value })}
+                    className={inputClass}
+                  />
+                </label>
               </>
             )}
           </Section>
@@ -306,29 +329,29 @@ export default function ProfileEditor({
               (confirmingDelete ? (
                 <button
                   onClick={onDelete}
-                  className="rounded-full bg-red-500/15 px-4 py-2 text-xs uppercase tracking-widest text-red-300 transition hover:bg-red-500/25"
+                  className="rounded-full bg-red-500/15 px-4 py-2 text-sm text-red-300 transition hover:bg-red-500/25"
                 >
                   Delete for good
                 </button>
               ) : (
                 <button
                   onClick={() => setConfirmingDelete(true)}
-                  className="rounded-full px-3 py-2 text-xs uppercase tracking-widest text-slate-600 transition hover:text-red-400"
+                  className="rounded-full px-3 py-2 text-sm text-slate-500 transition hover:text-red-400"
                 >
                   Delete
                 </button>
               ))}
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-4">
             <button
               onClick={onCancel}
-              className="rounded-full px-4 py-2 text-xs uppercase tracking-widest text-slate-500 transition hover:text-slate-300"
+              className="text-sm text-slate-500 transition hover:text-slate-300"
             >
               Cancel
             </button>
             <button
               onClick={save}
-              className="rounded-full bg-indigo-500 px-5 py-2 text-xs font-semibold uppercase tracking-widest text-white transition hover:bg-indigo-400"
+              className="rounded-full bg-indigo-500 px-5 py-2 text-sm font-medium text-white transition hover:bg-indigo-400"
             >
               {isNew ? "Create mood" : "Save"}
             </button>
