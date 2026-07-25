@@ -116,6 +116,15 @@ export interface SonicLayering {
   target_frequency_profile: string;
 }
 
+/** A mood can run itself on a timer. Times are "HH:MM" in the user's local time. */
+export interface Schedule {
+  enabled: boolean;
+  engage_time: string;
+  disengage_time: string;
+  /** 0 (Sunday) – 6 (Saturday). Empty means every day. */
+  days: number[];
+}
+
 export interface Profile {
   id: string;
   name: string;
@@ -124,6 +133,7 @@ export interface Profile {
   digital_purge: DigitalPurge;
   physical_orchestration: PhysicalOrchestration;
   sonic_layering: SonicLayering;
+  schedule: Schedule;
 }
 
 export interface MonolithConfig {

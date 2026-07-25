@@ -104,6 +104,25 @@ function summarize(profile: Profile): string {
   return bits.length > 0 ? bits.join(" · ") : "Nothing configured yet";
 }
 
+const DAY_ABBR = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
+
+/** "9am–5pm" instead of "09:00–17:00" — read as a schedule, not a config value. */
+function formatHour(hhmm: string): string {
+  const [hourStr, minute] = hhmm.split(":");
+  const hour = Number(hourStr);
+  const period = hour < 12 ? "am" : "pm";
+  const twelve = hour % 12 === 0 ? 12 : hour % 12;
+  return minute === "00" ? `${twelve}${period}` : `${twelve}:${minute}${period}`;
+}
+
+/** One line for a scheduled mood's card — absent entirely when scheduling is off. */
+function scheduleSummary(schedule: Profile["schedule"]): string | null {
+  if (!schedule.enabled) return null;
+  const range = `${formatHour(schedule.engage_time)}–${formatHour(schedule.disengage_time)}`;
+  const days = schedule.days.length > 0 ? ` · ${schedule.days.map((d) => DAY_ABBR[d]).join("")}` : "";
+  return `${range}${days}`;
+}
+
 export default function CommandDeck(): React.JSX.Element {
   const [config, setConfig] = useState<MonolithConfig | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -260,17 +279,22 @@ export default function CommandDeck(): React.JSX.Element {
         case "EXTERNAL_ENGAGE": {
           const profileId = typeof payload.profileId === "string" ? payload.profileId : null;
           const profileName = typeof payload.profileName === "string" ? payload.profileName : "A mood";
+          const trigger = typeof payload.trigger === "string" ? payload.trigger : "from the menu bar";
           if (profileId) {
             setActiveId(profileId);
             setEngagedId(profileId);
+            startWave("expand");
           }
-          appendLog([{ tone: "success", text: `${profileName} engaged from the menu bar.` }]);
+          appendLog([{ tone: "success", text: `${profileName} engaged ${trigger}.` }]);
           break;
         }
-        case "EXTERNAL_DISENGAGE":
+        case "EXTERNAL_DISENGAGE": {
+          const trigger = typeof payload.trigger === "string" ? payload.trigger : "from the menu bar";
           setEngagedId(null);
-          appendLog([{ tone: "success", text: "Disengaged from the menu bar." }]);
+          startWave("collapse");
+          appendLog([{ tone: "success", text: `Disengaged ${trigger}.` }]);
           break;
+        }
         case "STATS_UPDATED":
           void refreshStats();
           break;
@@ -853,6 +877,7 @@ function ProfileCard({
 }): React.JSX.Element {
   const hex = profile.physical_orchestration.hex_color;
   const mutedHex = mix(hex, MUTE_TOWARD, MUTE_FACTOR);
+  const scheduleLine = scheduleSummary(profile.schedule);
 
   return (
     <div
@@ -881,6 +906,7 @@ function ProfileCard({
           </span>
         </span>
         <span className="text-[11px] leading-snug text-slate-500">{summarize(profile)}</span>
+        {scheduleLine && <span className="text-[11px] leading-snug text-slate-600">{scheduleLine}</span>}
       </button>
 
       <button

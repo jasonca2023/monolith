@@ -16,6 +16,7 @@ import type {
   MonolithConfig,
   PhysicalOrchestration,
   Profile,
+  Schedule,
   SonicLayering,
   UserSettings,
 } from '../shared/types';
@@ -67,6 +68,27 @@ export function toXyPair(value: unknown): [number, number] {
 export function clamp(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) return min;
   return Math.min(max, Math.max(min, value));
+}
+
+const TIME_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)$/;
+
+function normalizeTime(value: unknown, fallback: string): string {
+  return typeof value === 'string' && TIME_PATTERN.test(value) ? value : fallback;
+}
+
+/** A config predating scheduling has no `schedule` block at all; disabled is the safe default. */
+export function normalizeSchedule(input: unknown): Schedule {
+  const source = (isRecord(input) ? input : {}) as Partial<Schedule>;
+  const days = Array.isArray(source.days)
+    ? [...new Set(source.days.map(Number).filter((day) => Number.isInteger(day) && day >= 0 && day <= 6))]
+    : [];
+
+  return {
+    enabled: Boolean(source.enabled ?? false),
+    engage_time: normalizeTime(source.engage_time, '09:00'),
+    disengage_time: normalizeTime(source.disengage_time, '17:00'),
+    days,
+  };
 }
 
 /** Fills every field so a hand-edited config can never crash the shell. */
@@ -127,5 +149,6 @@ export function normalizeProfile(input: unknown, index: number): Profile {
       playlist_uri: String(sonic.playlist_uri ?? ''),
       target_frequency_profile: String(sonic.target_frequency_profile ?? ''),
     },
+    schedule: normalizeSchedule(source.schedule),
   };
 }

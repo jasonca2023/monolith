@@ -6,7 +6,14 @@
 
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { clamp, normalizeConfig, normalizeProfile, toStringArray, toXyPair } from '../src/main/normalize';
+import {
+  clamp,
+  normalizeConfig,
+  normalizeProfile,
+  normalizeSchedule,
+  toStringArray,
+  toXyPair,
+} from '../src/main/normalize';
 
 describe('normalizeConfig', () => {
   test('fills a completely empty input', () => {
@@ -94,6 +101,8 @@ describe('normalizeProfile', () => {
     assert.equal(profile.id, 'deep_work');
     assert.deepEqual(profile.digital_purge.launch_applications, ['/Applications/iTerm.app']);
     assert.equal(profile.physical_orchestration.brightness, 35);
+    // Also predates scheduling — must default to off, not crash on the missing block.
+    assert.equal(profile.schedule.enabled, false);
   });
 
   test('clamps brightness into 0–100', () => {
@@ -141,6 +150,38 @@ describe('clamp', () => {
   test('non-finite input collapses to the minimum', () => {
     assert.equal(clamp(Number.NaN, 0, 100), 0);
     assert.equal(clamp(Number.POSITIVE_INFINITY, 0, 100), 0);
+  });
+});
+
+describe('normalizeSchedule', () => {
+  test('a config predating scheduling defaults to disabled with sane times', () => {
+    assert.deepEqual(normalizeSchedule(undefined), {
+      enabled: false,
+      engage_time: '09:00',
+      disengage_time: '17:00',
+      days: [],
+    });
+  });
+
+  test('a malformed time string falls back rather than shipping garbage', () => {
+    const schedule = normalizeSchedule({ engage_time: 'noon', disengage_time: '25:99' });
+    assert.equal(schedule.engage_time, '09:00');
+    assert.equal(schedule.disengage_time, '17:00');
+  });
+
+  test('accepts a valid HH:MM at the edges of the range', () => {
+    const schedule = normalizeSchedule({ engage_time: '00:00', disengage_time: '23:59' });
+    assert.equal(schedule.engage_time, '00:00');
+    assert.equal(schedule.disengage_time, '23:59');
+  });
+
+  test('days are deduplicated and clamped to 0-6', () => {
+    const schedule = normalizeSchedule({ days: [1, 1, 3, 9, -1, 2.5, 'Monday'] });
+    assert.deepEqual(schedule.days, [1, 3]);
+  });
+
+  test('a non-array days field becomes every day, not a crash', () => {
+    assert.deepEqual(normalizeSchedule({ days: 'MWF' }).days, []);
   });
 });
 

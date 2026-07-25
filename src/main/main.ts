@@ -28,6 +28,7 @@ import { setSystemFocus } from './focus-mode';
 import { discoverApps, resolveTargets } from './app-catalog';
 import { ProcessBlockade } from './blockade';
 import { summarizeSessions, trimSessions, type SessionRecord } from './sessions';
+import { MoodScheduler } from './scheduler';
 import { discoverBridges, pairWithBridge } from './hue-setup';
 import { authorize, isExpired, refreshTokens, type SpotifyTokens } from './spotify-auth';
 import { isRecord, normalizeConfig, normalizeProfile } from './normalize';
@@ -1033,24 +1034,62 @@ function showMainWindow(): void {
  * the first configured mood the first time this runs in a session — the
  * hotkey has no UI to ask "which mood?", so it needs a reasonable default.
  */
-async function engageFromOutsideWindow(): Promise<void> {
+async function engageFromOutsideWindow(trigger = 'from the menu bar'): Promise<void> {
   const targetId = lastProfileId ?? (await configStore.read()).profiles[0]?.id;
   if (!targetId) return;
 
   const report = await executeRealityShift(targetId);
   broadcastToRenderer({
     type: 'EXTERNAL_ENGAGE',
-    payload: { profileId: targetId, profileName: report.profileName },
+    payload: { profileId: targetId, profileName: report.profileName, trigger },
   });
   await refreshTray();
 }
 
-async function disengageFromOutsideWindow(): Promise<void> {
+async function disengageFromOutsideWindow(trigger = 'from the menu bar'): Promise<void> {
   const targetId = currentSession?.profileId ?? lastProfileId ?? 'default';
   await executeDisengage(targetId);
-  broadcastToRenderer({ type: 'EXTERNAL_DISENGAGE', payload: { profileId: targetId } });
+  broadcastToRenderer({ type: 'EXTERNAL_DISENGAGE', payload: { profileId: targetId, trigger } });
   await refreshTray();
 }
+
+/**
+ * The scheduler's own engage/disengage — routed through the exact same
+ * executeRealityShift/executeDisengage as every other trigger, so a scheduled
+ * mood gets the same blockade, session recording and tray refresh a manual
+ * engage gets for free, none of it duplicated here.
+ */
+async function engageFromSchedule(profile: { id: string; name: string }): Promise<void> {
+  log('info', 'schedule', `engaging "${profile.name}" on schedule`);
+  await executeRealityShift(profile.id);
+  broadcastToRenderer({
+    type: 'EXTERNAL_ENGAGE',
+    payload: { profileId: profile.id, profileName: profile.name, trigger: 'on schedule' },
+  });
+  await refreshTray();
+}
+
+async function disengageFromSchedule(profile: { id: string; name: string }): Promise<void> {
+  log('info', 'schedule', `disengaging "${profile.name}" on schedule`);
+  await executeDisengage(profile.id);
+  broadcastToRenderer({
+    type: 'EXTERNAL_DISENGAGE',
+    payload: { profileId: profile.id, trigger: 'on schedule' },
+  });
+  await refreshTray();
+}
+
+/**
+ * Polls every mood's schedule against wall-clock time. Lives in the main
+ * process, not the renderer, so a scheduled mood still fires with no window
+ * open — the whole point of a background scheduler.
+ */
+const scheduler = new MoodScheduler(
+  async () => (await configStore.read()).profiles,
+  engageFromSchedule,
+  disengageFromSchedule,
+  (profileId) => currentSession?.profileId === profileId,
+);
 
 /**
  * Rebuilt after every engage/disengage — from the tray, the hotkey, or the
@@ -1361,11 +1400,15 @@ if (!app.requestSingleInstanceLock()) {
     createTray();
 
     const registered = globalShortcut.register(TOGGLE_HOTKEY, () => {
-      void (currentSession ? disengageFromOutsideWindow() : engageFromOutsideWindow());
+      void (currentSession
+        ? disengageFromOutsideWindow('with the hotkey')
+        : engageFromOutsideWindow('with the hotkey'));
     });
     if (!registered) {
       log('warn', 'shell', `could not register the ${TOGGLE_HOTKEY} hotkey — likely already in use`);
     }
+
+    scheduler.start();
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) mainWindow = createMainWindow();
@@ -1377,7 +1420,10 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.on('will-quit', () => globalShortcut.unregisterAll());
-  app.on('before-quit', () => bridge.stop());
+  app.on('before-quit', () => {
+    bridge.stop();
+    scheduler.stop();
+  });
 }
 
 process.on('uncaughtException', (error) => {
