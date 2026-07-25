@@ -1,4 +1,10 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type {
+  BackendProfile,
+  BridgeEvent,
+  MonolithConfig,
+  RealityShiftReport,
+} from "../monolith";
 
 type ProfileKey = "deepWork" | "brainDump" | "highEnergy" | "lateNight";
 
@@ -9,6 +15,8 @@ interface LightZone {
 
 interface Profile {
   key: ProfileKey;
+  /** Matches the `id` of a profile in monolith_config.json. */
+  backendId: string;
   label: string;
   sublabel: string;
   accent: string;
@@ -16,21 +24,20 @@ interface Profile {
   accentDim: string;
   ring: string;
   textGlow: string;
-  lights: LightZone[];
-  binaries: string[];
-  iotScene: string;
-  iotColorLabel: string;
-  iotIp: string;
-  appPath: string;
-  tabsWiped: number;
-  sonicProfile: string;
+  fallbackHex: string;
 }
 
 const WS_PORT = 8080;
 
+/**
+ * Presentation layer only. Everything operational — which apps launch, which
+ * processes die, light colour, playlist — is read from monolith_config.json at
+ * runtime and keyed to `backendId`.
+ */
 const PROFILES: Record<ProfileKey, Profile> = {
   deepWork: {
     key: "deepWork",
+    backendId: "deep_work",
     label: "Deep Work",
     sublabel: "Lockdown Focus",
     accent: "#6366f1",
@@ -38,21 +45,11 @@ const PROFILES: Record<ProfileKey, Profile> = {
     accentDim: "rgba(99,102,241,0.12)",
     ring: "border-indigo-400",
     textGlow: "text-indigo-300",
-    lights: [
-      { label: "Key Light", hex: "#4338ca" },
-      { label: "Monitor Bias", hex: "#6366f1" },
-      { label: "Ambient Strip", hex: "#312e81" },
-    ],
-    binaries: ["VS Code", "iTerm2", "Slack (DND)", "Focus Timer"],
-    iotScene: "Hue Scene: Monolith / Lockdown",
-    iotColorLabel: "Focus Indigo",
-    iotIp: "192.168.1.50",
-    appPath: "/Applications/Visual Studio Code.app",
-    tabsWiped: 14,
-    sonicProfile: "Binaural Focus Waves",
+    fallbackHex: "#0000FF",
   },
   brainDump: {
     key: "brainDump",
+    backendId: "brain_dump",
     label: "Brain Dump",
     sublabel: "Creative Canvas",
     accent: "#f59e0b",
@@ -60,21 +57,11 @@ const PROFILES: Record<ProfileKey, Profile> = {
     accentDim: "rgba(245,158,11,0.12)",
     ring: "border-amber-400",
     textGlow: "text-amber-300",
-    lights: [
-      { label: "Key Light", hex: "#d97706" },
-      { label: "Monitor Bias", hex: "#f59e0b" },
-      { label: "Ambient Strip", hex: "#78350f" },
-    ],
-    binaries: ["Figma", "Notion", "Obsidian", "Spotify"],
-    iotScene: "Hue Scene: Monolith / Wildfire",
-    iotColorLabel: "Warm Amber",
-    iotIp: "192.168.1.51",
-    appPath: "/Applications/Notion.app",
-    tabsWiped: 6,
-    sonicProfile: "Lo-Fi Ideation Loop",
+    fallbackHex: "#FFA500",
   },
   highEnergy: {
     key: "highEnergy",
+    backendId: "high_energy",
     label: "High Energy",
     sublabel: "Operational Speed",
     accent: "#dc2626",
@@ -82,21 +69,11 @@ const PROFILES: Record<ProfileKey, Profile> = {
     accentDim: "rgba(220,38,38,0.12)",
     ring: "border-red-500",
     textGlow: "text-red-400",
-    lights: [
-      { label: "Key Light", hex: "#b91c1c" },
-      { label: "Monitor Bias", hex: "#ef4444" },
-      { label: "Ambient Strip", hex: "#450a0a" },
-    ],
-    binaries: ["iTerm2", "Datadog", "Zoom", "Linear"],
-    iotScene: "Hue Scene: Monolith / Redline",
-    iotColorLabel: "Intimidating Crimson",
-    iotIp: "192.168.1.52",
-    appPath: "/Applications/iTerm.app",
-    tabsWiped: 22,
-    sonicProfile: "High-Tempo Drive Stack",
+    fallbackHex: "#FF0000",
   },
   lateNight: {
     key: "lateNight",
+    backendId: "late_night_chill",
     label: "Late Night Chill",
     sublabel: "Decompression",
     accent: "#a855f7",
@@ -104,18 +81,7 @@ const PROFILES: Record<ProfileKey, Profile> = {
     accentDim: "rgba(168,85,247,0.12)",
     ring: "border-purple-400",
     textGlow: "text-purple-300",
-    lights: [
-      { label: "Key Light", hex: "#9333ea" },
-      { label: "Monitor Bias", hex: "#c026d3" },
-      { label: "Ambient Strip", hex: "#3b0764" },
-    ],
-    binaries: ["Apple TV", "Podcasts", "Sonos Controller"],
-    iotScene: "Hue Scene: Monolith / Afterglow",
-    iotColorLabel: "Deep Sunset Violet",
-    iotIp: "192.168.1.53",
-    appPath: "/Applications/Podcasts.app",
-    tabsWiped: 9,
-    sonicProfile: "Ambient Decompression Drone",
+    fallbackHex: "#8A2BE2",
   },
 };
 
@@ -166,7 +132,7 @@ const CRISIS_STATS: CrisisStat[] = [
   },
 ];
 
-type LogTone = "success" | "network" | "iot" | "sonic";
+type LogTone = "success" | "network" | "iot" | "sonic" | "warn" | "error";
 
 interface LogLine {
   id: string;
@@ -180,36 +146,38 @@ const LOG_TONE_CLASS: Record<LogTone, string> = {
   network: "text-cyan-400",
   iot: "text-fuchsia-400",
   sonic: "text-violet-300",
+  warn: "text-amber-400",
+  error: "text-red-400",
 };
-
-function buildLogLines(profile: Profile): Omit<LogLine, "id" | "time">[] {
-  return [
-    {
-      tone: "success",
-      text: `[MONOLITH IPC DEPLOYMENT SUCCESSFUL] Executing Node.js Child Process system command: ${profile.appPath} launched cleanly.`,
-    },
-    {
-      tone: "network",
-      text: `[BROWSING CONTAINMENT CONTRACT INITIATED] Active WebSocket transmission sent over port ${WS_PORT}: Wiping ${profile.tabsWiped} chaotic tabs, caching parameters, and dropping active session layout straight to clean slate canvas.`,
-    },
-    {
-      tone: "iot",
-      text: `[IoT MESH NETWORK BROADCASTING] Pinging mDNS IP array (${profile.iotIp}). Adjusting smart-lighting xy matrix to ${profile.iotColorLabel}. Target Hue transition time set to 500ms.`,
-    },
-    {
-      tone: "sonic",
-      text: `[SONIC LAYER INTERCEPTION TRIGGERED] Intercepting running Spotify Web API bearer token array. Forcing contextual frequency stream profile injection: ${profile.sonicProfile} active.`,
-    },
-  ];
-}
 
 function timestamp(): string {
   const now = new Date();
   return now.toTimeString().slice(0, 8) + "." + String(now.getMilliseconds()).padStart(3, "0");
 }
 
+function basename(filePath: string): string {
+  const parts = filePath.split(/[\\/]/).filter(Boolean);
+  const last = parts[parts.length - 1] ?? filePath;
+  return last.replace(/\.(app|exe|desktop|lnk)$/i, "");
+}
+
+/** Mixes a hex colour toward black so one configured colour drives three zones. */
+function shade(hex: string, factor: number): string {
+  const match = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+  if (!match) return hex;
+  const value = parseInt(match[1], 16);
+  const channel = (shift: number) =>
+    Math.max(0, Math.min(255, Math.round(((value >> shift) & 0xff) * factor)));
+  const toHex = (n: number) => n.toString(16).padStart(2, "0");
+  return `#${toHex(channel(16))}${toHex(channel(8))}${toHex(channel(0))}`;
+}
+
 export default function CommandDeck(): React.JSX.Element {
   const [activeKey, setActiveKey] = useState<ProfileKey>("deepWork");
+  const [config, setConfig] = useState<MonolithConfig | null>(null);
+  const [shellReady, setShellReady] = useState<boolean | null>(null);
+  const [extensionOnline, setExtensionOnline] = useState(false);
+  const [busy, setBusy] = useState(false);
   const [focusMode, setFocusMode] = useState(false);
   const [waveId, setWaveId] = useState(0);
   const [isWaving, setIsWaving] = useState(false);
@@ -219,38 +187,267 @@ export default function CommandDeck(): React.JSX.Element {
 
   const active = useMemo(() => PROFILES[activeKey], [activeKey]);
 
-  const appendLogLines = (profile: Profile) => {
-    const entries = buildLogLines(profile).map((entry) => {
-      logCounter.current += 1;
-      return {
-        ...entry,
-        id: `${profile.key}-${logCounter.current}`,
-        time: timestamp(),
-      };
+  const backend: BackendProfile | null = useMemo(() => {
+    if (!config) return null;
+    return config.profiles.find((profile) => profile.id === active.backendId) ?? null;
+  }, [config, active.backendId]);
+
+  const appendLog = useCallback((entries: { tone: LogTone; text: string }[]) => {
+    setLogLines((prev) => {
+      const next = entries.map((entry) => {
+        logCounter.current += 1;
+        return { ...entry, id: `log-${logCounter.current}`, time: timestamp() };
+      });
+      return [...prev, ...next].slice(-60);
     });
-    setLogLines((prev) => [...prev, ...entries].slice(-40));
-  };
+  }, []);
+
+  /* ---------------------------------------------------------------------- */
+  /* Boot: read the real config and subscribe to extension callbacks         */
+  /* ---------------------------------------------------------------------- */
 
   useEffect(() => {
-    appendLogLines(active);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeKey]);
+    const api = window.monolith;
+    if (!api) {
+      setShellReady(false);
+      appendLog([
+        {
+          tone: "error",
+          text: "[SHELL] Electron bridge not detected. Open this UI through the Monolith app — a browser tab cannot launch applications.",
+        },
+      ]);
+      return;
+    }
+
+    setShellReady(true);
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const [loaded, info] = await Promise.all([api.readConfig(), api.systemInfo()]);
+        if (cancelled) return;
+        setConfig(loaded);
+        appendLog([
+          {
+            tone: "success",
+            text: `[SHELL] Host online — ${info.platform}/${info.arch}, Electron ${info.electron}. ${loaded.profiles.length} profiles loaded.`,
+          },
+          {
+            tone: "network",
+            text: `[WS:${WS_PORT}] Bridge listening on ${info.bridgeUrl}. Awaiting extension handshake.`,
+          },
+        ]);
+      } catch (error) {
+        if (cancelled) return;
+        appendLog([{ tone: "error", text: `[SHELL] Config read failed: ${String(error)}` }]);
+      }
+    })();
+
+    const unsubscribe = api.onBridgeEvent((event: BridgeEvent) => {
+      const payload = event.payload ?? {};
+      switch (event.type) {
+        case "EXTENSION_READY":
+          setExtensionOnline(true);
+          appendLog([
+            { tone: "success", text: `[EXT] Service worker connected on port ${WS_PORT}.` },
+          ]);
+          break;
+        case "PURGE_COMPLETE": {
+          setExtensionOnline(true);
+          const blockade = payload.blockade as { armed?: boolean; domains?: string[] } | undefined;
+          appendLog([
+            {
+              tone: "network",
+              text: `[EXT] Purge complete — ${payload.cached ?? 0} tabs cached, ${payload.purged ?? 0} closed in ${payload.durationMs ?? 0}ms.`,
+            },
+            ...(blockade?.armed
+              ? [
+                  {
+                    tone: "warn" as LogTone,
+                    text: `[EXT] Blockade armed across ${blockade.domains?.length ?? 0} distraction domains.`,
+                  },
+                ]
+              : []),
+          ]);
+          break;
+        }
+        case "HYDRATE_COMPLETE":
+          setExtensionOnline(true);
+          appendLog([
+            {
+              tone: "network",
+              text: `[EXT] Session restored — ${payload.restored ?? 0} tabs rebuilt, ${payload.skipped ?? 0} skipped. Blockade released.`,
+            },
+          ]);
+          break;
+        case "BLOCKADE_RELEASED":
+          appendLog([{ tone: "success", text: "[EXT] Blockade released." }]);
+          break;
+        case "SIGNAL_FAILED":
+          appendLog([
+            {
+              tone: "error",
+              text: `[EXT] ${payload.signal ?? "signal"} failed: ${payload.error ?? "unknown"}`,
+            },
+          ]);
+          break;
+        default:
+          break;
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [appendLog]);
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [logLines]);
 
+  /* ---------------------------------------------------------------------- */
+  /* Execution                                                               */
+  /* ---------------------------------------------------------------------- */
+
+  const reportToLog = useCallback(
+    (report: RealityShiftReport): { tone: LogTone; text: string }[] => {
+      const lines: { tone: LogTone; text: string }[] = [];
+      const apps = report.applications;
+
+      lines.push({
+        tone: apps.failed === 0 ? "success" : "warn",
+        text: `[IPC] ${report.profileName} — ${apps.launched}/${apps.requested} applications launched in ${report.durationMs}ms.`,
+      });
+
+      for (const result of apps.results) {
+        if (result.status === "failed") {
+          lines.push({
+            tone: "error",
+            text: `[IPC] ${basename(result.target)} skipped: ${result.error}`,
+          });
+        }
+      }
+
+      const procs = report.processes;
+      if (procs.requested > 0) {
+        lines.push({
+          tone: procs.failed === 0 ? "success" : "warn",
+          text: `[PROC] ${procs.terminated} terminated, ${procs.notRunning} already closed, ${procs.failed} refused across ${procs.requested} targets.`,
+        });
+        for (const result of procs.results) {
+          if (result.status === "rejected" || result.status === "failed") {
+            lines.push({ tone: "warn", text: `[PROC] ${result.target}: ${result.error}` });
+          }
+        }
+      }
+
+      lines.push(
+        report.browser.ok
+          ? {
+              tone: "network",
+              text: `[WS:${WS_PORT}] ${report.browser.signal} delivered to ${report.browser.receivers} service worker${
+                report.browser.receivers === 1 ? "" : "s"
+              }.`,
+            }
+          : {
+              tone: "warn",
+              text: `[WS:${WS_PORT}] ${report.browser.signal} undelivered — ${report.browser.error}.`,
+            },
+      );
+
+      const physical = report.physical_orchestration;
+      if (physical?.lights_enabled) {
+        lines.push({
+          tone: "iot",
+          text: `[IoT] Hue ${config?.user_settings.hue_bridge_ip || "bridge unset"} — ${physical.hex_color} @ ${physical.brightness}%, xy [${physical.hue_xy_payload.join(", ")}]. Queued: actuation not wired yet.`,
+        });
+      }
+
+      const sonic = report.sonic_layering;
+      if (sonic?.spotify_enabled) {
+        lines.push({
+          tone: "sonic",
+          text: `[SONIC] ${sonic.target_frequency_profile} — ${sonic.playlist_uri}. Queued: actuation not wired yet.`,
+        });
+      }
+
+      return lines;
+    },
+    [config],
+  );
+
+  const handleNexusTrigger = useCallback(async () => {
+    const api = window.monolith;
+    if (!api || busy) return;
+
+    setBusy(true);
+    setIsWaving(true);
+    setWaveId((n) => n + 1);
+    window.setTimeout(() => setIsWaving(false), 650);
+
+    appendLog([{ tone: "network", text: `[IPC] execute-reality-shift → "${active.backendId}"` }]);
+
+    try {
+      const report = await api.executeRealityShift(active.backendId);
+      appendLog(reportToLog(report));
+      setFocusMode(true);
+    } catch (error) {
+      appendLog([{ tone: "error", text: `[IPC] Shift failed: ${String(error)}` }]);
+    } finally {
+      setBusy(false);
+    }
+  }, [active.backendId, appendLog, busy, reportToLog]);
+
+  const handleExitFocus = useCallback(async () => {
+    const api = window.monolith;
+    setFocusMode(false);
+    if (!api) return;
+
+    appendLog([{ tone: "network", text: "[IPC] dispatch-browser-signal → HYDRATE_SESSION" }]);
+    try {
+      const result = await api.dispatchBrowserSignal("HYDRATE_SESSION", {
+        profileId: active.backendId,
+      });
+      if (!result.ok) {
+        appendLog([{ tone: "warn", text: `[WS:${WS_PORT}] Hydrate undelivered — ${result.error}.` }]);
+      }
+    } catch (error) {
+      appendLog([{ tone: "error", text: `[IPC] Hydrate failed: ${String(error)}` }]);
+    }
+  }, [active.backendId, appendLog]);
+
   const handleSelectProfile = (key: ProfileKey) => {
     if (key === activeKey) return;
     setActiveKey(key);
+
+    const target = PROFILES[key];
+    const stored = config?.profiles.find((profile) => profile.id === target.backendId);
+    appendLog([
+      {
+        tone: stored ? "success" : "warn",
+        text: stored
+          ? `[DECK] ${target.label} staged — ${stored.digital_purge.launch_applications.length} apps, ${stored.digital_purge.kill_background_processes.length} processes, tabs ${
+              stored.digital_purge.close_browser_tabs ? "purge" : "restore"
+            }.`
+          : `[DECK] ${target.label} staged — no profile "${target.backendId}" found in config.`,
+      },
+    ]);
   };
 
-  const handleNexusTrigger = () => {
-    setIsWaving(true);
-    setWaveId((n) => n + 1);
-    setFocusMode((prev) => !prev);
-    window.setTimeout(() => setIsWaving(false), 650);
-  };
+  /* ---------------------------------------------------------------------- */
+  /* Derived display data — everything below comes from the live config      */
+  /* ---------------------------------------------------------------------- */
+
+  const baseHex = backend?.physical_orchestration.hex_color ?? active.fallbackHex;
+  const lights: LightZone[] = [
+    { label: "Key Light", hex: shade(baseHex, 0.75) },
+    { label: "Monitor Bias", hex: baseHex },
+    { label: "Ambient Strip", hex: shade(baseHex, 0.35) },
+  ];
+  const binaries = (backend?.digital_purge.launch_applications ?? []).map(basename);
+  const bridgeIp = config?.user_settings.hue_bridge_ip || "bridge unset";
+  const sonicProfile = backend?.sonic_layering.target_frequency_profile ?? "—";
 
   return (
     <div className="relative flex h-screen w-full flex-col overflow-hidden bg-black text-slate-100">
@@ -313,25 +510,24 @@ export default function CommandDeck(): React.JSX.Element {
         />
       )}
 
-      {/* Minimal corner wordmark — no title bar, no window chrome */}
-      <div className="pointer-events-none fixed left-4 top-3 z-40 text-[11px] font-semibold uppercase tracking-[0.35em] text-slate-600 sm:left-6">
-        MONOLITH
-      </div>
-
-      {focusMode && (
-        <button
-          onClick={() => setFocusMode(false)}
-          className="fixed right-4 top-4 z-40 rounded-full border border-slate-700 bg-slate-950/80 px-4 py-2 text-xs uppercase tracking-widest text-slate-400 backdrop-blur transition hover:border-slate-500 hover:text-slate-200 sm:right-6"
-        >
-          Exit Focus
-        </button>
-      )}
+      <TitleBar
+        onExitFocus={focusMode ? handleExitFocus : undefined}
+        shellReady={shellReady}
+        extensionOnline={extensionOnline}
+      />
 
       <div className="relative z-10 flex flex-1 flex-col overflow-hidden">
         {focusMode ? (
           /* Lockdown focus view — everything but the Nexus and active profile is stripped away */
           <div className="flex flex-1 flex-col items-center justify-center gap-6 px-4">
-            <NexusButton active={active} focusMode={focusMode} onClick={handleNexusTrigger} large />
+            <NexusButton
+              active={active}
+              focusMode={focusMode}
+              busy={busy}
+              disabled={!shellReady}
+              onClick={handleNexusTrigger}
+              large
+            />
             <p className={`text-sm uppercase tracking-[0.4em] ${active.textGlow}`}>
               {active.label} &mdash; {active.sublabel}
             </p>
@@ -341,9 +537,15 @@ export default function CommandDeck(): React.JSX.Element {
             {/* Main stage */}
             <div className="flex flex-col gap-6 overflow-y-auto pr-1 lg:pr-2">
               <div className="flex flex-col items-center gap-4 pt-8">
-                <NexusButton active={active} focusMode={focusMode} onClick={handleNexusTrigger} />
+                <NexusButton
+                  active={active}
+                  focusMode={focusMode}
+                  busy={busy}
+                  disabled={!shellReady}
+                  onClick={handleNexusTrigger}
+                />
                 <p className="text-xs uppercase tracking-widest text-slate-500">
-                  Nexus Trigger &mdash; {active.label}
+                  {busy ? "Executing…" : `Nexus Trigger — ${active.label}`}
                 </p>
               </div>
 
@@ -358,7 +560,14 @@ export default function CommandDeck(): React.JSX.Element {
                 ))}
               </div>
 
-              <RoomSimulator active={active} />
+              <RoomSimulator
+                active={active}
+                lights={lights}
+                binaries={binaries}
+                bridgeIp={bridgeIp}
+                sonicProfile={sonicProfile}
+                brightness={backend?.physical_orchestration.brightness ?? 0}
+              />
             </div>
 
             {/* Context Crisis Statistics Terminal */}
@@ -373,15 +582,23 @@ export default function CommandDeck(): React.JSX.Element {
               <span className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-500">
                 Monolith Deployment Log
               </span>
-              <span className="flex items-center gap-1.5 text-[11px] text-emerald-500">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-                LIVE
+              <span
+                className={`flex items-center gap-1.5 text-[11px] ${
+                  extensionOnline ? "text-emerald-500" : "text-slate-500"
+                }`}
+              >
+                <span
+                  className={`h-1.5 w-1.5 rounded-full ${
+                    extensionOnline ? "bg-emerald-500" : "bg-slate-600"
+                  }`}
+                />
+                {extensionOnline ? "EXTENSION LIVE" : "HOST ONLY"}
               </span>
             </div>
             <div className="command-deck-scroll h-28 overflow-y-auto rounded-lg border border-slate-800 bg-black/60 p-3 font-mono text-[11px] leading-relaxed sm:h-32 sm:text-xs">
               {logLines.map((line) => (
                 <div key={line.id} className="flex gap-2">
-                  <span className="text-slate-600">{line.time}</span>
+                  <span className="shrink-0 text-slate-600">{line.time}</span>
                   <span className={LOG_TONE_CLASS[line.tone]}>{line.text}</span>
                 </div>
               ))}
@@ -398,26 +615,120 @@ export default function CommandDeck(): React.JSX.Element {
   );
 }
 
+/**
+ * The shell runs frameless, so this strip is the only way to move the window
+ * and the only close button that exists.
+ */
+function TitleBar({
+  onExitFocus,
+  shellReady,
+  extensionOnline,
+}: {
+  onExitFocus?: () => void;
+  shellReady: boolean | null;
+  extensionOnline: boolean;
+}): React.JSX.Element {
+  const api = window.monolith;
+
+  return (
+    <header className="app-drag relative z-40 flex h-11 shrink-0 items-center justify-between px-4 sm:px-6">
+      <div className="flex items-center gap-3">
+        <span className="text-[11px] font-semibold uppercase tracking-[0.35em] text-slate-600">
+          MONOLITH
+        </span>
+        {shellReady === false && (
+          <span className="rounded-full border border-red-500/40 px-2 py-0.5 text-[10px] uppercase tracking-widest text-red-400">
+            Shell offline
+          </span>
+        )}
+        {shellReady === true && !extensionOnline && (
+          <span className="rounded-full border border-slate-700 px-2 py-0.5 text-[10px] uppercase tracking-widest text-slate-500">
+            No extension
+          </span>
+        )}
+      </div>
+
+      <div className="app-no-drag flex items-center gap-2">
+        {onExitFocus && (
+          <button
+            onClick={onExitFocus}
+            className="rounded-full border border-slate-700 bg-slate-950/80 px-4 py-1.5 text-xs uppercase tracking-widest text-slate-400 backdrop-blur transition hover:border-slate-500 hover:text-slate-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-400"
+          >
+            Exit focus &amp; restore tabs
+          </button>
+        )}
+        {api && (
+          <div className="flex items-center gap-1">
+            <WindowButton label="Minimize" onClick={() => void api.window.minimize()}>
+              &#8722;
+            </WindowButton>
+            <WindowButton label="Toggle maximize" onClick={() => void api.window.toggleMaximize()}>
+              &#9633;
+            </WindowButton>
+            <WindowButton label="Close" onClick={() => void api.window.close()} danger>
+              &#10005;
+            </WindowButton>
+          </div>
+        )}
+      </div>
+    </header>
+  );
+}
+
+function WindowButton({
+  label,
+  onClick,
+  danger,
+  children,
+}: {
+  label: string;
+  onClick: () => void;
+  danger?: boolean;
+  children: React.ReactNode;
+}): React.JSX.Element {
+  return (
+    <button
+      aria-label={label}
+      title={label}
+      onClick={onClick}
+      className={`flex h-6 w-6 items-center justify-center rounded text-[11px] text-slate-600 transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-400 ${
+        danger ? "hover:bg-red-500/20 hover:text-red-300" : "hover:bg-slate-800 hover:text-slate-300"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
 function NexusButton({
   active,
   focusMode,
+  busy,
+  disabled,
   onClick,
   large,
 }: {
   active: Profile;
   focusMode: boolean;
+  busy: boolean;
+  disabled: boolean;
   onClick: () => void;
   large?: boolean;
 }): React.JSX.Element {
+  const label = busy ? "Working" : focusMode ? "Engaged" : "Engage";
+
   return (
     <button
       onClick={onClick}
-      className={`nexus-pulse group relative flex items-center justify-center rounded-full border-2 bg-gradient-to-b from-[#1e1e1e] to-black transition-transform duration-300 active:scale-95 ${
+      disabled={disabled || busy}
+      aria-busy={busy}
+      className={`nexus-pulse group relative flex items-center justify-center rounded-full border-2 bg-gradient-to-b from-[#1e1e1e] to-black transition-transform duration-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 ${
         large ? "h-56 w-56 sm:h-72 sm:w-72" : "h-40 w-40 sm:h-52 sm:w-52"
       }`}
       style={
         {
           borderColor: active.accent,
+          outlineColor: active.accent,
           "--nexus-glow": active.accent,
           "--nexus-glow-soft": active.accentSoft,
         } as React.CSSProperties
@@ -429,7 +740,7 @@ function NexusButton({
         }`}
         style={{ color: active.accent }}
       >
-        {focusMode ? "Engaged" : "Engage"}
+        {label}
       </span>
     </button>
   );
@@ -447,7 +758,8 @@ function ProfileCard({
   return (
     <button
       onClick={onSelect}
-      className={`flex flex-col items-start gap-1 rounded-xl border bg-[#121212] p-3 text-left transition-all duration-300 sm:p-4 ${
+      aria-pressed={isActive}
+      className={`flex flex-col items-start gap-1 rounded-xl border bg-[#121212] p-3 text-left transition-all duration-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-400 sm:p-4 ${
         isActive
           ? `${profile.ring} shadow-[0_0_25px_var(--tw-shadow-color)]`
           : "border-[#1e1e1e] hover:border-slate-600"
@@ -470,14 +782,33 @@ function ProfileCard({
   );
 }
 
-function RoomSimulator({ active }: { active: Profile }): React.JSX.Element {
+function RoomSimulator({
+  active,
+  lights,
+  binaries,
+  bridgeIp,
+  sonicProfile,
+  brightness,
+}: {
+  active: Profile;
+  lights: LightZone[];
+  binaries: string[];
+  bridgeIp: string;
+  sonicProfile: string;
+  brightness: number;
+}): React.JSX.Element {
   return (
     <section className="rounded-2xl border border-[#1e1e1e] bg-[#121212]/60 p-4 sm:p-6">
       <h2 className="mb-4 text-xs uppercase tracking-[0.3em] text-slate-500">
         Virtual Space Environment Simulator
       </h2>
       <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-        <svg viewBox="0 0 320 200" className="w-full rounded-lg">
+        <svg
+          viewBox="0 0 320 200"
+          className="w-full rounded-lg"
+          role="img"
+          aria-label="Room lighting preview"
+        >
           <defs>
             <radialGradient id="ambientGlow" cx="50%" cy="20%" r="80%">
               <stop offset="0%" stopColor={active.accentSoft} />
@@ -498,7 +829,7 @@ function RoomSimulator({ active }: { active: Profile }): React.JSX.Element {
             width="68"
             height="38"
             rx="2"
-            fill={active.lights[1].hex}
+            fill={lights[1].hex}
             style={{ transition: "fill 500ms ease", opacity: 0.85 }}
           />
           <rect x="152" y="130" width="16" height="10" fill="#1e293b" />
@@ -509,7 +840,7 @@ function RoomSimulator({ active }: { active: Profile }): React.JSX.Element {
             width="280"
             height="6"
             rx="3"
-            fill={active.lights[2].hex}
+            fill={lights[2].hex}
             style={{ transition: "fill 500ms ease" }}
           />
           {Array.from({ length: 7 }).map((_, i) => (
@@ -520,7 +851,7 @@ function RoomSimulator({ active }: { active: Profile }): React.JSX.Element {
               width="20"
               height="4"
               rx="2"
-              fill={active.lights[2].hex}
+              fill={lights[2].hex}
               style={{ transition: "fill 500ms ease", opacity: 0.5 }}
             />
           ))}
@@ -529,14 +860,14 @@ function RoomSimulator({ active }: { active: Profile }): React.JSX.Element {
             cx="255"
             cy="70"
             r="10"
-            fill={active.lights[0].hex}
+            fill={lights[0].hex}
             style={{ transition: "fill 500ms ease" }}
           />
           <line x1="255" y1="80" x2="255" y2="140" stroke="#1e293b" strokeWidth="3" />
         </svg>
 
         <div className="flex flex-col justify-center gap-3">
-          {active.lights.map((zone) => (
+          {lights.map((zone) => (
             <div key={zone.label} className="flex items-center justify-between gap-3">
               <span className="text-xs text-slate-400 sm:text-sm">{zone.label}</span>
               <div className="flex items-center gap-2">
@@ -549,17 +880,23 @@ function RoomSimulator({ active }: { active: Profile }): React.JSX.Element {
             </div>
           ))}
           <div className="mt-2 rounded-lg border border-[#1e1e1e] bg-black/40 px-3 py-2 text-[11px] text-slate-500">
-            {active.iotScene}
+            Hue bridge {bridgeIp} · {brightness}% · {sonicProfile}
           </div>
           <div className="flex flex-wrap gap-2">
-            {active.binaries.map((bin) => (
-              <span
-                key={bin}
-                className="rounded-full border border-[#1e1e1e] px-2 py-0.5 text-[11px] text-slate-300"
-              >
-                {bin}
+            {binaries.length > 0 ? (
+              binaries.map((bin) => (
+                <span
+                  key={bin}
+                  className="rounded-full border border-[#1e1e1e] px-2 py-0.5 text-[11px] text-slate-300"
+                >
+                  {bin}
+                </span>
+              ))
+            ) : (
+              <span className="text-[11px] text-slate-600">
+                No applications configured for this profile.
               </span>
-            ))}
+            )}
           </div>
         </div>
       </div>

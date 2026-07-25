@@ -970,8 +970,8 @@ function registerIpcHandlers(): void {
   ipcMain.handle('system:info', async () => ({
     platform: process.platform,
     arch: process.arch,
-    electron: process.versions.electron,
-    node: process.versions.node,
+    electron: process.versions.electron ?? 'unknown',
+    node: process.versions.node ?? 'unknown',
     bridgeUrl: `ws://${BRIDGE_HOST}:${BRIDGE_PORT}`,
   }));
 
