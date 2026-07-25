@@ -1,12 +1,13 @@
 /**
- * Monolith — Electron main process.
+ * Monolith — Electron main process controller.
  *
- * Owns three things:
- *   1. The application shell (single window, hardened, contextIsolated).
- *   2. The "reality shift" executor — launches local applications through the
- *      platform's own opener in non-blocking background child processes.
- *   3. The orchestration bridge — a localhost WebSocket server on :8080 that
- *      pushes signals to the Monolith Chrome extension service worker.
+ * Owns four things:
+ *   1. The frameless application shell (custom dark chrome, no native title bar).
+ *   2. The reality-shift executor — launches native applications and terminates
+ *      background noise in detached, non-blocking child processes.
+ *   3. The orchestration bridge — a WebSocket server on :8080 that pipes signals
+ *      to the companion Chrome extension with sub-second latency.
+ *   4. The configuration store for monolith_config.json.
  */
 
 import { app, BrowserWindow, ipcMain, shell } from 'electron';
@@ -26,15 +27,39 @@ const BRIDGE_PORT = 8080;
 const BRIDGE_HOST = '127.0.0.1';
 const BRIDGE_HEARTBEAT_MS = 30_000;
 const LAUNCH_TIMEOUT_MS = 15_000;
+const KILL_TIMEOUT_MS = 10_000;
 const CONFIG_FILENAME = 'monolith_config.json';
 
-/** Control characters and quote metacharacters we refuse to hand to a shell. */
-// eslint-disable-next-line no-control-regex
-const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
+/** Process names may only contain these characters before reaching a shell. */
+const SAFE_PROCESS_NAME = /^[A-Za-z0-9 ._-]+$/;
+
+/** cmd.exe offers no literal-quoting construct, so these are refused outright. */
 const WINDOWS_FORBIDDEN = /["%!]/;
 
+/**
+ * Terminating any of these takes the desktop session or the host app with it.
+ * A profile that names one is rejected rather than obeyed.
+ */
+const PROTECTED_PROCESSES = new Set([
+  'kernel_task',
+  'launchd',
+  'windowserver',
+  'loginwindow',
+  'systemd',
+  'init',
+  'csrss.exe',
+  'wininit.exe',
+  'winlogon.exe',
+  'services.exe',
+  'lsass.exe',
+  'explorer.exe',
+  'electron',
+  'monolith',
+  'monolith.exe',
+]);
+
 /* -------------------------------------------------------------------------- */
-/* Configuration types                                                         */
+/* Configuration schema                                                        */
 /* -------------------------------------------------------------------------- */
 
 export interface UserSettings {
@@ -43,36 +68,34 @@ export interface UserSettings {
   hue_api_key: string;
 }
 
-export interface LightingDirective {
+export interface DigitalPurge {
+  close_browser_tabs: boolean;
+  launch_applications: string[];
+  kill_background_processes: string[];
+}
+
+export interface PhysicalOrchestration {
+  lights_enabled: boolean;
   hex_color: string;
   brightness: number;
-  transition_ms: number;
+  hue_xy_payload: [number, number];
 }
 
-export interface AudioDirective {
+export interface SonicLayering {
+  spotify_enabled: boolean;
   playlist_uri: string;
-  shuffle: boolean;
-  volume_percent: number;
+  target_frequency_profile: string;
 }
-
-export type BrowserAction = 'AGGRESSIVE_PURGE' | 'HYDRATE_SESSION' | 'NONE';
 
 export interface Profile {
   id: string;
-  label: string;
-  description: string;
-  applications: {
-    darwin: string[];
-    win32: string[];
-    linux: string[];
-  };
-  lighting: LightingDirective;
-  audio: AudioDirective;
-  browser_action: BrowserAction;
+  name: string;
+  digital_purge: DigitalPurge;
+  physical_orchestration: PhysicalOrchestration;
+  sonic_layering: SonicLayering;
 }
 
 export interface MonolithConfig {
-  version: number;
   user_settings: UserSettings;
   profiles: Profile[];
 }
@@ -82,6 +105,8 @@ export interface MonolithConfig {
 /* -------------------------------------------------------------------------- */
 
 export type LaunchStatus = 'launched' | 'failed';
+export type KillStatus = 'terminated' | 'not_running' | 'rejected' | 'failed';
+export type BrowserSignal = 'AGGRESSIVE_PURGE' | 'HYDRATE_SESSION';
 
 export interface LaunchResult {
   target: string;
@@ -91,22 +116,46 @@ export interface LaunchResult {
   error?: string;
 }
 
-export interface RealityShiftReport {
-  ok: boolean;
-  platform: NodeJS.Platform;
-  requested: number;
-  launched: number;
-  failed: number;
-  results: LaunchResult[];
-  startedAt: string;
-  finishedAt: string;
+export interface KillResult {
+  target: string;
+  status: KillStatus;
+  durationMs: number;
+  command?: string;
+  error?: string;
 }
 
-export interface BridgeDispatchReport {
+export interface BrowserDispatchResult {
+  signal: BrowserSignal | 'NONE';
   ok: boolean;
-  signal: string;
   receivers: number;
   error?: string;
+}
+
+export interface RealityShiftReport {
+  ok: boolean;
+  profileId: string;
+  profileName: string;
+  platform: NodeJS.Platform;
+  applications: {
+    requested: number;
+    launched: number;
+    failed: number;
+    results: LaunchResult[];
+  };
+  processes: {
+    requested: number;
+    terminated: number;
+    notRunning: number;
+    failed: number;
+    results: KillResult[];
+  };
+  browser: BrowserDispatchResult;
+  physical_orchestration: PhysicalOrchestration | null;
+  sonic_layering: SonicLayering | null;
+  startedAt: string;
+  finishedAt: string;
+  durationMs: number;
+  errors: string[];
 }
 
 /* -------------------------------------------------------------------------- */
@@ -124,12 +173,11 @@ function log(level: LogLevel, scope: string, message: string, detail?: unknown):
   }
 }
 
-/** Normalizes anything thrown into a printable string. */
 function describeError(error: unknown): string {
   if (error instanceof Error) {
     const withCode = error as NodeJS.ErrnoException & { stderr?: string };
     const parts = [error.message.trim()];
-    if (withCode.code) parts.push(`(code ${withCode.code})`);
+    if (withCode.code !== undefined) parts.push(`(code ${withCode.code})`);
     const stderr = withCode.stderr?.trim();
     if (stderr) parts.push(`stderr: ${stderr}`);
     return parts.join(' ');
@@ -137,12 +185,20 @@ function describeError(error: unknown): string {
   return typeof error === 'string' ? error : JSON.stringify(error);
 }
 
+/** No regex: keeps control-character detection independent of source encoding. */
+function hasControlCharacters(value: string): boolean {
+  for (const character of value) {
+    const code = character.codePointAt(0) ?? 0;
+    if (code < 0x20 || code === 0x7f) return true;
+  }
+  return false;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Configuration store                                                         */
 /* -------------------------------------------------------------------------- */
 
 const DEFAULT_CONFIG: MonolithConfig = {
-  version: 1,
   user_settings: {
     spotify_auth_token: '',
     hue_bridge_ip: '',
@@ -154,7 +210,7 @@ const DEFAULT_CONFIG: MonolithConfig = {
 class ConfigStore {
   private cache: MonolithConfig | null = null;
 
-  /** Writable copy lives in userData; the repo copy is only ever a template. */
+  /** The writable copy lives in userData; the repo file is only ever a template. */
   private get userPath(): string {
     return path.join(app.getPath('userData'), CONFIG_FILENAME);
   }
@@ -183,7 +239,7 @@ class ConfigStore {
     return this.cache;
   }
 
-  async write(config: MonolithConfig): Promise<MonolithConfig> {
+  async write(config: unknown): Promise<MonolithConfig> {
     const normalized = normalizeConfig(config);
     const target = this.userPath;
     const scratch = `${target}.tmp`;
@@ -196,6 +252,11 @@ class ConfigStore {
     this.cache = normalized;
     log('info', 'config', `persisted ${normalized.profiles.length} profile(s) to ${target}`);
     return normalized;
+  }
+
+  async findProfile(id: string): Promise<Profile | null> {
+    const config = await this.read();
+    return config.profiles.find((profile) => profile.id === id) ?? null;
   }
 
   private async readFirstAvailable(candidates: string[]): Promise<string | null> {
@@ -213,13 +274,12 @@ class ConfigStore {
   }
 }
 
-/** Fills in missing fields so a hand-edited config can never crash the shell. */
+/** Fills every field so a hand-edited config can never crash the shell. */
 function normalizeConfig(input: unknown): MonolithConfig {
-  const source = (typeof input === 'object' && input !== null ? input : {}) as Partial<MonolithConfig>;
-  const settings = (source.user_settings ?? {}) as Partial<UserSettings>;
+  const source = (isRecord(input) ? input : {}) as Partial<MonolithConfig>;
+  const settings = (isRecord(source.user_settings) ? source.user_settings : {}) as Partial<UserSettings>;
 
   return {
-    version: typeof source.version === 'number' ? source.version : 1,
     user_settings: {
       spotify_auth_token: String(settings.spotify_auth_token ?? ''),
       hue_bridge_ip: String(settings.hue_bridge_ip ?? ''),
@@ -230,39 +290,48 @@ function normalizeConfig(input: unknown): MonolithConfig {
 }
 
 function normalizeProfile(input: unknown, index: number): Profile {
-  const source = (typeof input === 'object' && input !== null ? input : {}) as Partial<Profile>;
-  const apps = (source.applications ?? {}) as Partial<Profile['applications']>;
-  const lighting = (source.lighting ?? {}) as Partial<LightingDirective>;
-  const audio = (source.audio ?? {}) as Partial<AudioDirective>;
-  const action = source.browser_action;
+  const source = (isRecord(input) ? input : {}) as Partial<Profile>;
+  const purge = (isRecord(source.digital_purge) ? source.digital_purge : {}) as Partial<DigitalPurge>;
+  const physical = (isRecord(source.physical_orchestration)
+    ? source.physical_orchestration
+    : {}) as Partial<PhysicalOrchestration>;
+  const sonic = (isRecord(source.sonic_layering) ? source.sonic_layering : {}) as Partial<SonicLayering>;
 
   return {
     id: String(source.id ?? `profile_${index}`),
-    label: String(source.label ?? `Profile ${index + 1}`),
-    description: String(source.description ?? ''),
-    applications: {
-      darwin: toStringArray(apps.darwin),
-      win32: toStringArray(apps.win32),
-      linux: toStringArray(apps.linux),
+    name: String(source.name ?? `Profile ${index + 1}`),
+    digital_purge: {
+      close_browser_tabs: Boolean(purge.close_browser_tabs ?? false),
+      launch_applications: toStringArray(purge.launch_applications),
+      kill_background_processes: toStringArray(purge.kill_background_processes),
     },
-    lighting: {
-      hex_color: String(lighting.hex_color ?? '#FFFFFF'),
-      brightness: clamp(Number(lighting.brightness ?? 100), 1, 100),
-      transition_ms: clamp(Number(lighting.transition_ms ?? 800), 0, 60_000),
+    physical_orchestration: {
+      lights_enabled: Boolean(physical.lights_enabled ?? false),
+      hex_color: String(physical.hex_color ?? '#FFFFFF'),
+      brightness: clamp(Number(physical.brightness ?? 100), 0, 100),
+      hue_xy_payload: toXyPair(physical.hue_xy_payload),
     },
-    audio: {
-      playlist_uri: String(audio.playlist_uri ?? ''),
-      shuffle: Boolean(audio.shuffle ?? false),
-      volume_percent: clamp(Number(audio.volume_percent ?? 60), 0, 100),
+    sonic_layering: {
+      spotify_enabled: Boolean(sonic.spotify_enabled ?? false),
+      playlist_uri: String(sonic.playlist_uri ?? ''),
+      target_frequency_profile: String(sonic.target_frequency_profile ?? ''),
     },
-    browser_action:
-      action === 'AGGRESSIVE_PURGE' || action === 'HYDRATE_SESSION' ? action : 'NONE',
   };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function toStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0);
+}
+
+/** CIE 1931 xy coordinates are always a two-element pair inside the gamut. */
+function toXyPair(value: unknown): [number, number] {
+  if (!Array.isArray(value) || value.length < 2) return [0.3127, 0.329];
+  return [clamp(Number(value[0]), 0, 1), clamp(Number(value[1]), 0, 1)];
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -271,24 +340,25 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Launch pipeline                                                             */
+/* Shell quoting                                                               */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Wraps a path in POSIX single quotes. Everything inside single quotes is
+ * Wraps a value in POSIX single quotes. Everything inside single quotes is
  * literal to the shell, so the only escape needed is for the quote itself.
  */
-function quotePosix(target: string): string {
-  return `'${target.replace(/'/g, `'\\''`)}'`;
+function quotePosix(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-/**
- * cmd.exe has no literal-quoting construct, so unsafe characters are rejected
- * by `assertLaunchable` before we ever build the command string.
- */
-function quoteWindows(target: string): string {
-  return `"${target}"`;
+/** Safe only because unsafe characters are rejected before this is called. */
+function quoteWindows(value: string): string {
+  return `"${value}"`;
 }
+
+/* -------------------------------------------------------------------------- */
+/* Application launcher                                                        */
+/* -------------------------------------------------------------------------- */
 
 /** Throws with a human-readable reason if `target` must not reach a shell. */
 async function assertLaunchable(target: unknown): Promise<string> {
@@ -300,19 +370,21 @@ async function assertLaunchable(target: unknown): Promise<string> {
   if (trimmed.length === 0) {
     throw new Error('path is empty');
   }
-  if (CONTROL_CHARS.test(trimmed)) {
+  if (hasControlCharacters(trimmed)) {
     throw new Error('path contains control characters');
   }
-  if (!path.isAbsolute(trimmed)) {
+  if (!path.isAbsolute(trimmed) && !/^[A-Za-z]:[\\/]/.test(trimmed)) {
     throw new Error('path must be absolute');
   }
   if (process.platform === 'win32' && WINDOWS_FORBIDDEN.test(trimmed)) {
     throw new Error('path contains characters that cannot be safely quoted for cmd.exe');
   }
 
-  // Fail fast with a useful message instead of a silent shell error later.
+  // Fail fast with a useful message instead of a silent shell error later. A
+  // cross-platform profile always carries paths for the other OS; those land
+  // here and degrade to a single skipped entry.
   await fs.access(trimmed).catch(() => {
-    throw new Error('path does not exist or is not readable');
+    throw new Error('path does not exist on this machine');
   });
 
   return trimmed;
@@ -330,9 +402,9 @@ function buildLaunchCommand(target: string): string {
 }
 
 /**
- * Launches one application. The returned promise settles as soon as the
- * platform opener hands off — the launched app keeps running detached, and a
- * failure here never propagates far enough to stall the renderer.
+ * Launches one application. Settles as soon as the platform opener hands off —
+ * the launched app keeps running detached and a failure never reaches the
+ * renderer as a rejection.
  */
 async function launchApplication(rawTarget: unknown): Promise<LaunchResult> {
   const startedAt = Date.now();
@@ -343,7 +415,7 @@ async function launchApplication(rawTarget: unknown): Promise<LaunchResult> {
     target = await assertLaunchable(rawTarget);
   } catch (error) {
     const message = describeError(error);
-    log('warn', 'launch', `rejected "${label}": ${message}`);
+    log('warn', 'launch', `skipped "${label}": ${message}`);
     return { target: label, status: 'failed', durationMs: Date.now() - startedAt, error: message };
   }
 
@@ -369,68 +441,83 @@ async function launchApplication(rawTarget: unknown): Promise<LaunchResult> {
   } catch (error) {
     const message = describeError(error);
     log('error', 'launch', `failed to launch "${target}": ${message}`);
-    return {
-      target,
-      status: 'failed',
-      durationMs: Date.now() - startedAt,
-      command,
-      error: message,
-    };
+    return { target, status: 'failed', durationMs: Date.now() - startedAt, command, error: message };
   }
 }
 
-/**
- * Fans every requested path out concurrently. One bad path degrades to a single
- * `failed` entry in the report; the rest of the shift still completes.
- */
-async function executeRealityShift(paths: unknown): Promise<RealityShiftReport> {
-  const startedAt = new Date();
-  const requested = Array.isArray(paths) ? paths : [];
+/* -------------------------------------------------------------------------- */
+/* Background process terminator                                               */
+/* -------------------------------------------------------------------------- */
 
-  if (!Array.isArray(paths)) {
-    log('warn', 'shift', `expected an array of paths, received ${typeof paths}`);
+function assertKillable(name: unknown): string {
+  if (typeof name !== 'string') {
+    throw new Error(`expected a string process name, received ${typeof name}`);
   }
 
-  // Dedupe so a profile listing the same app twice does not double-launch it.
-  const unique = Array.from(
-    new Set(requested.map((entry) => (typeof entry === 'string' ? entry.trim() : entry))),
-  );
+  const trimmed = name.trim();
+  if (trimmed.length === 0) {
+    throw new Error('process name is empty');
+  }
+  if (!SAFE_PROCESS_NAME.test(trimmed)) {
+    throw new Error('process name contains unsupported characters');
+  }
+  if (PROTECTED_PROCESSES.has(trimmed.toLowerCase())) {
+    throw new Error('process is protected and will not be terminated');
+  }
 
-  log('info', 'shift', `executing reality shift across ${unique.length} target(s) on ${process.platform}`);
+  return trimmed;
+}
 
-  const settled = await Promise.allSettled(unique.map((target) => launchApplication(target)));
+function buildKillCommand(name: string): string {
+  if (process.platform === 'win32') {
+    const image = /\.exe$/i.test(name) ? name : `${name}.exe`;
+    return `taskkill /F /IM ${quoteWindows(image)}`;
+  }
+  // -i: case-insensitive, -x: whole-name match, so "Steam" never matches
+  // "steamwebhelper-adjacent" processes by prefix.
+  return `pkill -i -x -- ${quotePosix(name)}`;
+}
 
-  const results: LaunchResult[] = settled.map((outcome, index) => {
-    if (outcome.status === 'fulfilled') return outcome.value;
-    return {
-      target: String(unique[index]),
-      status: 'failed',
-      durationMs: 0,
-      error: describeError(outcome.reason),
-    };
-  });
+/**
+ * "Nothing matched" is the expected outcome for an app that simply is not
+ * running, and both platforms signal it through the exit code rather than an
+ * error stream: pkill exits 1, taskkill exits 128.
+ */
+function isNotRunningExit(error: unknown): boolean {
+  const code = (error as { code?: unknown }).code;
+  if (process.platform === 'win32') return code === 128 || code === 1;
+  return code === 1;
+}
 
-  const launched = results.filter((result) => result.status === 'launched').length;
-  const finishedAt = new Date();
+async function killProcess(rawName: unknown): Promise<KillResult> {
+  const startedAt = Date.now();
+  const label = typeof rawName === 'string' ? rawName : String(rawName);
 
-  log(
-    'info',
-    'shift',
-    `reality shift complete — ${launched} launched, ${results.length - launched} failed in ${
-      finishedAt.getTime() - startedAt.getTime()
-    }ms`,
-  );
+  let name: string;
+  try {
+    name = assertKillable(rawName);
+  } catch (error) {
+    const message = describeError(error);
+    log('warn', 'kill', `refused "${label}": ${message}`);
+    return { target: label, status: 'rejected', durationMs: Date.now() - startedAt, error: message };
+  }
 
-  return {
-    ok: results.length > 0 && launched === results.length,
-    platform: process.platform,
-    requested: unique.length,
-    launched,
-    failed: results.length - launched,
-    results,
-    startedAt: startedAt.toISOString(),
-    finishedAt: finishedAt.toISOString(),
-  };
+  const command = buildKillCommand(name);
+
+  try {
+    await execAsync(command, { timeout: KILL_TIMEOUT_MS, windowsHide: true, maxBuffer: 1024 * 1024 });
+    log('info', 'kill', `terminated "${name}"`);
+    return { target: name, status: 'terminated', durationMs: Date.now() - startedAt, command };
+  } catch (error) {
+    if (isNotRunningExit(error)) {
+      log('info', 'kill', `"${name}" was not running`);
+      return { target: name, status: 'not_running', durationMs: Date.now() - startedAt, command };
+    }
+
+    const message = describeError(error);
+    log('error', 'kill', `failed to terminate "${name}": ${message}`);
+    return { target: name, status: 'failed', durationMs: Date.now() - startedAt, command, error: message };
+  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -569,17 +656,184 @@ class OrchestrationBridge {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Application shell                                                           */
+/* Reality shift                                                               */
 /* -------------------------------------------------------------------------- */
 
 const configStore = new ConfigStore();
 const bridge = new OrchestrationBridge();
+
+/**
+ * Accepts whatever the renderer has on hand: a full profile object, a profile
+ * id to resolve from disk, or a bare array of application paths.
+ */
+async function resolveProfile(payload: unknown): Promise<Profile> {
+  if (typeof payload === 'string') {
+    const stored = await configStore.findProfile(payload);
+    if (stored) return stored;
+    throw new Error(`no profile registered under id "${payload}"`);
+  }
+
+  if (Array.isArray(payload)) {
+    return normalizeProfile(
+      { id: 'ad_hoc', name: 'Ad-hoc Shift', digital_purge: { launch_applications: payload } },
+      0,
+    );
+  }
+
+  if (isRecord(payload)) {
+    // A profile id with no body still resolves against the stored config.
+    if (!isRecord(payload.digital_purge) && typeof payload.id === 'string') {
+      const stored = await configStore.findProfile(payload.id);
+      if (stored) return stored;
+    }
+    return normalizeProfile(payload, 0);
+  }
+
+  throw new Error(`expected a profile payload, received ${typeof payload}`);
+}
+
+/**
+ * Runs the full shift. Applications and process terminations fan out
+ * concurrently; a single failure anywhere degrades to one entry in the report
+ * and never aborts the rest.
+ */
+async function executeRealityShift(payload: unknown): Promise<RealityShiftReport> {
+  const startedAt = new Date();
+  const errors: string[] = [];
+
+  let profile: Profile;
+  try {
+    profile = await resolveProfile(payload);
+  } catch (error) {
+    const message = describeError(error);
+    log('error', 'shift', message);
+    return emptyReport(startedAt, message);
+  }
+
+  const { launch_applications, kill_background_processes, close_browser_tabs } = profile.digital_purge;
+
+  log(
+    'info',
+    'shift',
+    `executing "${profile.name}" — ${launch_applications.length} app(s), ` +
+      `${kill_background_processes.length} process(es), browser purge ${close_browser_tabs}`,
+  );
+
+  // Dedupe so a profile listing the same target twice does not act twice.
+  const apps = Array.from(new Set(launch_applications.map((entry) => entry.trim())));
+  const kills = Array.from(new Set(kill_background_processes.map((entry) => entry.trim())));
+
+  const [launchOutcomes, killOutcomes] = await Promise.all([
+    Promise.allSettled(apps.map((target) => launchApplication(target))),
+    Promise.allSettled(kills.map((target) => killProcess(target))),
+  ]);
+
+  const launchResults: LaunchResult[] = launchOutcomes.map((outcome, index) =>
+    outcome.status === 'fulfilled'
+      ? outcome.value
+      : { target: String(apps[index]), status: 'failed', durationMs: 0, error: describeError(outcome.reason) },
+  );
+
+  const killResults: KillResult[] = killOutcomes.map((outcome, index) =>
+    outcome.status === 'fulfilled'
+      ? outcome.value
+      : { target: String(kills[index]), status: 'failed', durationMs: 0, error: describeError(outcome.reason) },
+  );
+
+  for (const result of [...launchResults, ...killResults]) {
+    if (result.error) errors.push(`${result.target}: ${result.error}`);
+  }
+
+  // close_browser_tabs drives the direction: true banks the session and clears
+  // the viewport, false restores whatever a previous purge banked.
+  const signal: BrowserSignal = close_browser_tabs ? 'AGGRESSIVE_PURGE' : 'HYDRATE_SESSION';
+  const receivers = bridge.broadcast(signal, {
+    profileId: profile.id,
+    profileName: profile.name,
+  });
+  const browser: BrowserDispatchResult = {
+    signal,
+    ok: receivers > 0,
+    receivers,
+    error: receivers === 0 ? 'no extension service worker is connected' : undefined,
+  };
+  if (!browser.ok) errors.push(`browser: ${browser.error}`);
+
+  const launched = launchResults.filter((result) => result.status === 'launched').length;
+  const terminated = killResults.filter((result) => result.status === 'terminated').length;
+  const notRunning = killResults.filter((result) => result.status === 'not_running').length;
+  const finishedAt = new Date();
+  const durationMs = finishedAt.getTime() - startedAt.getTime();
+
+  log(
+    'info',
+    'shift',
+    `"${profile.name}" complete in ${durationMs}ms — ${launched}/${launchResults.length} launched, ` +
+      `${terminated} terminated, browser signal reached ${receivers} client(s)`,
+  );
+
+  return {
+    ok: errors.length === 0,
+    profileId: profile.id,
+    profileName: profile.name,
+    platform: process.platform,
+    applications: {
+      requested: launchResults.length,
+      launched,
+      failed: launchResults.length - launched,
+      results: launchResults,
+    },
+    processes: {
+      requested: killResults.length,
+      terminated,
+      notRunning,
+      failed: killResults.filter((result) => result.status === 'failed' || result.status === 'rejected').length,
+      results: killResults,
+    },
+    browser,
+    physical_orchestration: profile.physical_orchestration,
+    sonic_layering: profile.sonic_layering,
+    startedAt: startedAt.toISOString(),
+    finishedAt: finishedAt.toISOString(),
+    durationMs,
+    errors,
+  };
+}
+
+function emptyReport(startedAt: Date, error: string): RealityShiftReport {
+  const finishedAt = new Date();
+  return {
+    ok: false,
+    profileId: 'unknown',
+    profileName: 'unknown',
+    platform: process.platform,
+    applications: { requested: 0, launched: 0, failed: 0, results: [] },
+    processes: { requested: 0, terminated: 0, notRunning: 0, failed: 0, results: [] },
+    browser: { signal: 'NONE', ok: false, receivers: 0, error },
+    physical_orchestration: null,
+    sonic_layering: null,
+    startedAt: startedAt.toISOString(),
+    finishedAt: finishedAt.toISOString(),
+    durationMs: finishedAt.getTime() - startedAt.getTime(),
+    errors: [error],
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Application shell                                                           */
+/* -------------------------------------------------------------------------- */
+
 let mainWindow: BrowserWindow | null = null;
 
 const FALLBACK_RENDERER = `data:text/html;charset=utf-8,${encodeURIComponent(
   `<!doctype html><meta charset="utf-8"><title>Monolith</title>
-   <style>body{background:#0b0b0f;color:#e6e6ef;font:15px/1.6 -apple-system,Segoe UI,sans-serif;
-   display:grid;place-items:center;height:100vh;margin:0}code{color:#8ab4ff}</style>
+   <style>
+     body{background:#0b0b0f;color:#e6e6ef;font:15px/1.6 -apple-system,Segoe UI,sans-serif;
+     display:grid;place-items:center;height:100vh;margin:0}
+     header{position:fixed;top:0;left:0;right:0;height:38px;-webkit-app-region:drag}
+     code{color:#8ab4ff}
+   </style>
+   <header></header>
    <div><h1>Monolith backend is live</h1>
    <p>No renderer bundle found. Build the frontend branch into <code>dist/renderer</code>
    or set <code>MONOLITH_RENDERER_URL</code>.</p></div>`,
@@ -593,7 +847,11 @@ function createMainWindow(): BrowserWindow {
     minHeight: 600,
     show: false,
     backgroundColor: '#0b0b0f',
-    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
+    // Native chrome is dropped entirely; the renderer paints its own title bar
+    // and drives it through the window:* IPC channels below.
+    frame: false,
+    titleBarStyle: 'hidden',
+    trafficLightPosition: { x: 16, y: 16 },
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -659,41 +917,32 @@ async function loadRenderer(window: BrowserWindow): Promise<void> {
 /* -------------------------------------------------------------------------- */
 
 function registerIpcHandlers(): void {
-  ipcMain.handle('execute-reality-shift', async (_event, paths: unknown): Promise<RealityShiftReport> => {
+  ipcMain.handle('execute-reality-shift', async (_event, profilePayload: unknown): Promise<RealityShiftReport> => {
+    const startedAt = new Date();
     try {
-      return await executeRealityShift(paths);
+      return await executeRealityShift(profilePayload);
     } catch (error) {
-      // Absolute backstop: the renderer always gets a report, never a rejection.
+      // Absolute backstop: the renderer always receives a report, never a throw.
       const message = describeError(error);
       log('error', 'shift', 'unhandled failure during reality shift', message);
-      const now = new Date().toISOString();
-      return {
-        ok: false,
-        platform: process.platform,
-        requested: Array.isArray(paths) ? paths.length : 0,
-        launched: 0,
-        failed: Array.isArray(paths) ? paths.length : 0,
-        results: [],
-        startedAt: now,
-        finishedAt: now,
-      };
+      return emptyReport(startedAt, message);
     }
   });
 
   ipcMain.handle(
     'dispatch-browser-signal',
-    async (_event, signal: unknown, payload?: unknown): Promise<BridgeDispatchReport> => {
-      const allowed: BrowserAction[] = ['AGGRESSIVE_PURGE', 'HYDRATE_SESSION'];
-      if (typeof signal !== 'string' || !allowed.includes(signal as BrowserAction)) {
+    async (_event, signal: unknown, payload?: unknown): Promise<BrowserDispatchResult> => {
+      const allowed: BrowserSignal[] = ['AGGRESSIVE_PURGE', 'HYDRATE_SESSION'];
+      if (typeof signal !== 'string' || !allowed.includes(signal as BrowserSignal)) {
         const error = `unknown browser signal "${String(signal)}"`;
         log('warn', 'bridge', error);
-        return { ok: false, signal: String(signal), receivers: 0, error };
+        return { signal: 'NONE', ok: false, receivers: 0, error };
       }
 
       const receivers = bridge.broadcast(signal, payload);
       return {
+        signal: signal as BrowserSignal,
         ok: receivers > 0,
-        signal,
         receivers,
         error: receivers === 0 ? 'no extension service worker is connected' : undefined,
       };
@@ -711,7 +960,7 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle('config:write', async (_event, config: unknown): Promise<MonolithConfig> => {
     try {
-      return await configStore.write(config as MonolithConfig);
+      return await configStore.write(config);
     } catch (error) {
       log('error', 'config', 'failed to persist config', describeError(error));
       return normalizeConfig(config);
@@ -725,6 +974,26 @@ function registerIpcHandlers(): void {
     node: process.versions.node,
     bridgeUrl: `ws://${BRIDGE_HOST}:${BRIDGE_PORT}`,
   }));
+
+  // A frameless window has no native controls, so the renderer owns them.
+  ipcMain.handle('window:minimize', (event) => {
+    BrowserWindow.fromWebContents(event.sender)?.minimize();
+  });
+
+  ipcMain.handle('window:toggle-maximize', (event) => {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (!window) return false;
+    if (window.isMaximized()) {
+      window.unmaximize();
+      return false;
+    }
+    window.maximize();
+    return true;
+  });
+
+  ipcMain.handle('window:close', (event) => {
+    BrowserWindow.fromWebContents(event.sender)?.close();
+  });
 }
 
 /* -------------------------------------------------------------------------- */

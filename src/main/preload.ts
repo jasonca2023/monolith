@@ -8,7 +8,8 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 
 export interface MonolithApi {
-  executeRealityShift(paths: string[]): Promise<unknown>;
+  /** Accepts a full profile object, a profile id, or a bare array of app paths. */
+  executeRealityShift(profilePayload: unknown): Promise<unknown>;
   dispatchBrowserSignal(
     signal: 'AGGRESSIVE_PURGE' | 'HYDRATE_SESSION',
     payload?: unknown,
@@ -17,10 +18,16 @@ export interface MonolithApi {
   writeConfig(config: unknown): Promise<unknown>;
   systemInfo(): Promise<unknown>;
   onBridgeEvent(listener: (event: unknown) => void): () => void;
+  /** The shell is frameless, so the renderer owns the window controls. */
+  window: {
+    minimize(): Promise<void>;
+    toggleMaximize(): Promise<boolean>;
+    close(): Promise<void>;
+  };
 }
 
 const api: MonolithApi = {
-  executeRealityShift: (paths) => ipcRenderer.invoke('execute-reality-shift', paths),
+  executeRealityShift: (profilePayload) => ipcRenderer.invoke('execute-reality-shift', profilePayload),
   dispatchBrowserSignal: (signal, payload) =>
     ipcRenderer.invoke('dispatch-browser-signal', signal, payload),
   readConfig: () => ipcRenderer.invoke('config:read'),
@@ -30,6 +37,11 @@ const api: MonolithApi = {
     const handler = (_event: IpcRendererEvent, payload: unknown) => listener(payload);
     ipcRenderer.on('bridge:event', handler);
     return () => ipcRenderer.removeListener('bridge:event', handler);
+  },
+  window: {
+    minimize: () => ipcRenderer.invoke('window:minimize'),
+    toggleMaximize: () => ipcRenderer.invoke('window:toggle-maximize'),
+    close: () => ipcRenderer.invoke('window:close'),
   },
 };
 

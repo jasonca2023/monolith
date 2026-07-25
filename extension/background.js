@@ -1,22 +1,27 @@
 /**
  * Monolith — Chrome Extension (Manifest V3) service worker.
  *
- * Holds a localhost WebSocket link to the Electron host and executes the two
- * browser-side halves of a reality shift:
+ * Holds a localhost WebSocket link to the Electron host and executes the
+ * browser-side half of a reality shift:
  *
- *   AGGRESSIVE_PURGE  — snapshot every open, non-pinned tab, persist it, drop a
- *                       clean new tab, then close the whole set in one call.
- *   HYDRATE_SESSION   — rebuild the snapshot tab-for-tab and clear the cache.
+ *   AGGRESSIVE_PURGE  — snapshot every open, non-pinned tab under the profile's
+ *                       id, persist it, drop a clean staging tab, then close the
+ *                       whole set. Arms the distraction blockade for deep_work.
+ *   HYDRATE_SESSION   — rebuild that profile's snapshot tab-for-tab, clear the
+ *                       storage trace, and release the blockade.
+ *   RELEASE_BLOCKADE  — unconditional escape hatch for the host or the popup.
  *
  * MV3 workers are evicted aggressively, so nothing here assumes it stays
- * resident: state lives in chrome.storage, and a chrome.alarms tick revives the
- * worker and re-establishes the socket.
+ * resident: state lives in chrome.storage and in the dynamic rule set, and a
+ * chrome.alarms tick revives the worker and re-establishes the socket.
  */
 
 'use strict';
 
 const BRIDGE_URL = 'ws://localhost:8080';
-const SESSION_KEY = 'monolith.session.snapshot';
+const SESSION_KEY_PREFIX = 'monolith.session.';
+const LAST_PROFILE_KEY = 'monolith.session.__last';
+const FOCUS_STATE_KEY = 'monolith.focus.session';
 const KEEPALIVE_ALARM = 'monolith-keepalive';
 const KEEPALIVE_PERIOD_MINUTES = 0.5;
 
@@ -24,10 +29,33 @@ const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30_000;
 const BLANK_TAB_URL = 'chrome://newtab/';
 
-/** URL schemes chrome.tabs.create is allowed to recreate. */
+/** URL schemes chrome.tabs.create is permitted to recreate. */
 const RESTORABLE_SCHEME = /^(https?|file|ftp):/i;
 
-/** Module-scope only — treated as cache, never as the source of truth. */
+/** The profile whose purge arms the hostile-domain blockade. */
+const BLOCKADE_PROFILE_ID = 'deep_work';
+
+/** Overridable per signal via payload.blocked_domains. */
+const DEFAULT_BLOCKED_DOMAINS = [
+  'twitter.com',
+  'x.com',
+  'reddit.com',
+  'youtube.com',
+  'instagram.com',
+  'tiktok.com',
+  'facebook.com',
+  'news.ycombinator.com',
+  'twitch.tv',
+];
+
+/**
+ * Dynamic rule ids are owned by this worker exclusively. Keeping them in a
+ * reserved band means a reset only ever clears Monolith's own rules.
+ */
+const RULE_ID_BASE = 9000;
+const RULE_ID_CEILING = 9999;
+
+/** Module-scope state is a cache only — never the source of truth. */
 let socket = null;
 let reconnectAttempts = 0;
 let reconnectTimer = null;
@@ -46,6 +74,10 @@ function log(message, detail) {
 
 function logError(message, error) {
   console.error(`[monolith] ${message}`, error instanceof Error ? error.message : error);
+}
+
+function messageOf(error) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -83,7 +115,7 @@ function connect() {
 
   next.addEventListener('error', () => {
     // The close event carries the actionable information; this fires first and
-    // intentionally stays quiet so a host that is simply not running is not noisy.
+    // stays quiet so a host that simply is not running does not spam the log.
     log('bridge socket error (host may be offline)');
   });
 
@@ -133,18 +165,24 @@ async function handleSignal(raw) {
   }
 
   const type = envelope && envelope.type;
+  const payload = (envelope && envelope.payload) || {};
   log(`signal received: ${type}`);
 
   try {
     switch (type) {
       case 'AGGRESSIVE_PURGE': {
-        const result = await aggressivePurge();
+        const result = await aggressivePurge(payload);
         report('PURGE_COMPLETE', result);
         break;
       }
       case 'HYDRATE_SESSION': {
-        const result = await hydrateSession();
+        const result = await hydrateSession(payload);
         report('HYDRATE_COMPLETE', result);
+        break;
+      }
+      case 'RELEASE_BLOCKADE': {
+        const cleared = await deactivateBlockade();
+        report('BLOCKADE_RELEASED', { cleared });
         break;
       }
       case 'BRIDGE_READY':
@@ -155,8 +193,129 @@ async function handleSignal(raw) {
     }
   } catch (error) {
     logError(`signal "${type}" failed`, error);
-    report('SIGNAL_FAILED', { signal: type, error: String(error && error.message ? error.message : error) });
+    report('SIGNAL_FAILED', { signal: type, error: messageOf(error) });
   }
+}
+
+function sessionKeyFor(profileId) {
+  return `${SESSION_KEY_PREFIX}${profileId || 'default'}`;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Hostile domain blockade (declarativeNetRequest)                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Builds one redirect rule per domain. `requestDomains` also covers subdomains,
+ * so a single entry catches www., m., and old.reddit.com alike.
+ */
+function buildBlockadeRules(domains, redirectUrl) {
+  return domains.map((domain, index) => ({
+    id: RULE_ID_BASE + index,
+    priority: 1,
+    action: redirectUrl
+      ? { type: 'redirect', redirect: { url: redirectUrl } }
+      : { type: 'redirect', redirect: { extensionPath: '/blocked.html' } },
+    condition: {
+      requestDomains: [domain],
+      resourceTypes: ['main_frame'],
+    },
+  }));
+}
+
+/** Every id this worker owns, so a reset never touches another rule set. */
+function ownedRuleIds() {
+  const ids = [];
+  for (let id = RULE_ID_BASE; id <= RULE_ID_CEILING; id += 1) ids.push(id);
+  return ids;
+}
+
+async function activateBlockade(payload) {
+  const domains = Array.isArray(payload.blocked_domains) && payload.blocked_domains.length > 0
+    ? payload.blocked_domains.filter((entry) => typeof entry === 'string' && entry.trim().length > 0)
+    : DEFAULT_BLOCKED_DOMAINS;
+
+  const capped = domains.slice(0, RULE_ID_CEILING - RULE_ID_BASE + 1);
+  const redirectUrl = typeof payload.redirect_url === 'string' ? payload.redirect_url : '';
+
+  // Record the session before the rules land so the countdown page always has
+  // something to render, even on the very first blocked navigation.
+  await chrome.storage.local.set({
+    [FOCUS_STATE_KEY]: {
+      profileId: payload.profileId || BLOCKADE_PROFILE_ID,
+      profileName: payload.profileName || 'Deep Work',
+      startedAt: Date.now(),
+      endsAt: typeof payload.duration_minutes === 'number'
+        ? Date.now() + payload.duration_minutes * 60_000
+        : null,
+      domains: capped,
+    },
+  });
+
+  await chrome.declarativeNetRequest.updateDynamicRules({
+    removeRuleIds: ownedRuleIds(),
+    addRules: buildBlockadeRules(capped, redirectUrl),
+  });
+
+  log(`blockade armed across ${capped.length} domain(s)`);
+
+  // A distracting tab already open would otherwise survive the purge untouched.
+  await evictOpenDistractions(capped, redirectUrl);
+
+  return { armed: true, domains: capped, redirectUrl: redirectUrl || 'chrome-extension://blocked.html' };
+}
+
+async function deactivateBlockade() {
+  await chrome.declarativeNetRequest.updateDynamicRules({
+    removeRuleIds: ownedRuleIds(),
+    addRules: [],
+  });
+  await chrome.storage.local.remove(FOCUS_STATE_KEY);
+  log('blockade released');
+  return true;
+}
+
+/**
+ * DNR only intercepts navigations, so a pinned tab already sitting on a blocked
+ * domain has to be pushed to the countdown page explicitly.
+ */
+async function evictOpenDistractions(domains, redirectUrl) {
+  let evicted = 0;
+  const target = redirectUrl || chrome.runtime.getURL('blocked.html');
+
+  try {
+    const tabs = await chrome.tabs.query({});
+    for (const tab of tabs) {
+      const url = tab.pendingUrl || tab.url || '';
+      if (!url || typeof tab.id !== 'number') continue;
+      if (!matchesBlockedDomain(url, domains)) continue;
+
+      try {
+        await chrome.tabs.update(tab.id, { url: target });
+        evicted += 1;
+      } catch (error) {
+        logError(`could not evict tab ${tab.id}`, error);
+      }
+    }
+  } catch (error) {
+    logError('could not scan tabs for open distractions', error);
+  }
+
+  if (evicted > 0) log(`evicted ${evicted} already-open distraction tab(s)`);
+  return evicted;
+}
+
+function matchesBlockedDomain(url, domains) {
+  let host;
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  return domains.some((domain) => {
+    const needle = String(domain).toLowerCase();
+    return host === needle || host.endsWith(`.${needle}`);
+  });
 }
 
 /* -------------------------------------------------------------------------- */
@@ -202,25 +361,38 @@ function serializeTab(tab) {
 /* AGGRESSIVE_PURGE                                                            */
 /* -------------------------------------------------------------------------- */
 
-async function aggressivePurge() {
+async function aggressivePurge(payload) {
   const startedAt = Date.now();
+  const profileId = payload.profileId || 'default';
   const tabs = await queryPurgeableTabs();
+
+  // The blockade is a property of the profile, not of the tab count — arm it
+  // even when there was nothing to close.
+  const blockade =
+    profileId === BLOCKADE_PROFILE_ID
+      ? await activateBlockade(payload)
+      : { armed: false, cleared: await deactivateBlockade() };
 
   if (tabs.length === 0) {
     log('purge requested but no unpinned tabs are open');
-    return { purged: 0, cached: 0, durationMs: Date.now() - startedAt };
+    return { profileId, purged: 0, cached: 0, failed: 0, blockade, durationMs: Date.now() - startedAt };
   }
 
   const snapshot = {
     version: 1,
+    profileId,
+    profileName: payload.profileName || '',
     capturedAt: new Date().toISOString(),
     windowId: tabs[0].windowId,
     tabs: tabs.map(serializeTab),
   };
 
   // Persist before destroying anything — a failed write must never cost tabs.
-  await chrome.storage.local.set({ [SESSION_KEY]: snapshot });
-  log(`cached ${snapshot.tabs.length} tab(s) to local storage`);
+  await chrome.storage.local.set({
+    [sessionKeyFor(profileId)]: snapshot,
+    [LAST_PROFILE_KEY]: profileId,
+  });
+  log(`cached ${snapshot.tabs.length} tab(s) under "${sessionKeyFor(profileId)}"`);
 
   const blankTabId = await openBlankTab(snapshot.windowId);
 
@@ -234,17 +406,19 @@ async function aggressivePurge() {
   log(`purge complete — ${purged}/${doomed.length} tab(s) closed in ${durationMs}ms`);
 
   return {
+    profileId,
     purged,
     cached: snapshot.tabs.length,
     failed: doomed.length - purged,
     capturedAt: snapshot.capturedAt,
+    blockade,
     durationMs,
   };
 }
 
 /**
  * chrome.tabs.create rejects most chrome:// URLs; the new tab page is the
- * exception on current Chrome, and an empty create yields it everywhere else.
+ * exception on current Chrome, and a bare create yields it everywhere else.
  */
 async function openBlankTab(windowId) {
   const base = typeof windowId === 'number' ? { windowId } : {};
@@ -252,7 +426,7 @@ async function openBlankTab(windowId) {
   try {
     const tab = await chrome.tabs.create({ ...base, url: BLANK_TAB_URL, active: true });
     return tab.id;
-  } catch (error) {
+  } catch {
     log('chrome://newtab/ was rejected, opening a default blank tab instead');
     try {
       const tab = await chrome.tabs.create({ ...base, active: true });
@@ -279,10 +453,7 @@ async function terminateTabs(tabIds) {
     logError('batch termination failed, falling back to per-tab removal', error);
   }
 
-  const outcomes = await Promise.allSettled(
-    tabIds.map((id) => chrome.tabs.remove(id)),
-  );
-
+  const outcomes = await Promise.allSettled(tabIds.map((id) => chrome.tabs.remove(id)));
   return outcomes.filter((outcome) => outcome.status === 'fulfilled').length;
 }
 
@@ -290,14 +461,21 @@ async function terminateTabs(tabIds) {
 /* HYDRATE_SESSION                                                             */
 /* -------------------------------------------------------------------------- */
 
-async function hydrateSession() {
+async function hydrateSession(payload) {
   const startedAt = Date.now();
-  const stored = await chrome.storage.local.get(SESSION_KEY);
-  const snapshot = stored[SESSION_KEY];
+
+  // Leaving deep work always lifts the blockade, even if there is nothing to
+  // restore — otherwise a user could be locked out by an empty snapshot.
+  await deactivateBlockade();
+
+  const profileId = await resolveHydrationProfile(payload);
+  const key = sessionKeyFor(profileId);
+  const stored = await chrome.storage.local.get(key);
+  const snapshot = stored[key];
 
   if (!snapshot || !Array.isArray(snapshot.tabs) || snapshot.tabs.length === 0) {
-    log('hydrate requested but no cached session exists');
-    return { restored: 0, skipped: 0, durationMs: Date.now() - startedAt };
+    log(`hydrate requested but no cached session exists for "${profileId}"`);
+    return { profileId, restored: 0, skipped: 0, durationMs: Date.now() - startedAt };
   }
 
   const targetWindowId = await resolveHydrationWindow(snapshot.windowId);
@@ -328,13 +506,22 @@ async function hydrateSession() {
     }
   }
 
-  // Volatile layer is single-use: a restored session must not be restorable twice.
-  await chrome.storage.local.remove(SESSION_KEY);
+  // The volatile layer is single-use: a restored session is not restorable twice.
+  await chrome.storage.local.remove([key, LAST_PROFILE_KEY]);
 
   const durationMs = Date.now() - startedAt;
   log(`hydrate complete — ${restored} restored, ${skipped} skipped in ${durationMs}ms`);
 
-  return { restored, skipped, capturedAt: snapshot.capturedAt, durationMs };
+  return { profileId, restored, skipped, capturedAt: snapshot.capturedAt, durationMs };
+}
+
+/** An explicit id wins; otherwise fall back to whichever profile purged last. */
+async function resolveHydrationProfile(payload) {
+  if (payload && typeof payload.profileId === 'string' && payload.profileId.length > 0) {
+    return payload.profileId;
+  }
+  const stored = await chrome.storage.local.get(LAST_PROFILE_KEY);
+  return stored[LAST_PROFILE_KEY] || 'default';
 }
 
 /** Prefers the window the snapshot came from; falls back to whatever is focused. */
@@ -370,11 +557,16 @@ function bootstrap() {
 
 chrome.runtime.onInstalled.addListener(() => {
   log('extension installed');
+  // Dynamic rules survive reloads; a fresh install must never inherit a blockade.
+  void deactivateBlockade();
   bootstrap();
 });
 
 chrome.runtime.onStartup.addListener(() => {
   log('browser started');
+  // A browser restart ends the focus session, so the blockade must not outlive
+  // it — otherwise a crash mid-deep-work would lock the user out permanently.
+  void deactivateBlockade();
   bootstrap();
 });
 
@@ -387,13 +579,13 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 });
 
-// Lets the popup or a content script trigger a shift without the desktop host.
+// Lets the popup or the countdown page drive a shift without the desktop host.
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || typeof message.type !== 'string') return false;
 
   handleSignal(JSON.stringify(message))
     .then(() => sendResponse({ ok: true }))
-    .catch((error) => sendResponse({ ok: false, error: String(error) }));
+    .catch((error) => sendResponse({ ok: false, error: messageOf(error) }));
 
   return true; // keep the message channel open for the async response
 });

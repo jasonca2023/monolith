@@ -1,134 +1,89 @@
 {
-  "version": 1,
   "user_settings": {
-    "spotify_auth_token": "",
-    "hue_bridge_ip": "",
-    "hue_api_key": ""
+    "spotify_auth_token": "OAUTH_BEARER_ACCESS_TOKEN_STRING_PROTOTYPE",
+    "hue_bridge_ip": "192.168.1.50",
+    "hue_api_key": "AUTHORIZED_LOCAL_HUE_DEVELOPER_HASH"
   },
   "profiles": [
     {
       "id": "deep_work",
-      "label": "Deep Work",
-      "description": "Single-context focus block. Editor and terminal only, cold white light, no lyrics.",
-      "applications": {
-        "darwin": [
-          "/Applications/Visual Studio Code.app",
-          "/Applications/iTerm.app",
-          "/Applications/Notion.app"
-        ],
-        "win32": [
-          "C:\\Users\\Public\\Desktop\\Visual Studio Code.lnk",
-          "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
-        ],
-        "linux": [
-          "/usr/share/applications/code.desktop",
-          "/usr/share/applications/org.gnome.Terminal.desktop"
-        ]
+      "name": "Deep Work",
+      "digital_purge": {
+        "close_browser_tabs": true,
+        "launch_applications": ["/Applications/Visual Studio Code.app", "/Applications/iTerm.app", "C:\\Program Files\\Git\\git-bash.exe"],
+        "kill_background_processes": ["Slack", "Discord", "Steam", "AdobeUpdateService"]
       },
-      "lighting": {
-        "hex_color": "#4A6FFF",
-        "brightness": 85,
-        "transition_ms": 1200
+      "physical_orchestration": {
+        "lights_enabled": true,
+        "hex_color": "#0000FF",
+        "brightness": 35,
+        "hue_xy_payload": [0.157, 0.018]
       },
-      "audio": {
-        "playlist_uri": "spotify:playlist:37i9dQZF1DX8NTLI2TtZa6",
-        "shuffle": false,
-        "volume_percent": 45
-      },
-      "browser_action": "AGGRESSIVE_PURGE"
+      "sonic_layering": {
+        "spotify_enabled": true,
+        "playlist_uri": "spotify:playlist:37i9dQZF1DWWQRwui0ExPn",
+        "target_frequency_profile": "Binaural Focus Waves"
+      }
     },
     {
       "id": "brain_dump",
-      "label": "Brain Dump",
-      "description": "Divergent capture mode. Notes and whiteboard surfaces, warm neutral light, ambient audio.",
-      "applications": {
-        "darwin": [
-          "/Applications/Obsidian.app",
-          "/Applications/Figma.app",
-          "/System/Applications/Notes.app"
-        ],
-        "win32": [
-          "C:\\Users\\Public\\Desktop\\Obsidian.lnk",
-          "C:\\Windows\\System32\\mspaint.exe"
-        ],
-        "linux": [
-          "/usr/share/applications/obsidian.desktop",
-          "/usr/share/applications/gnome-text-editor.desktop"
-        ]
+      "name": "Brain Dump",
+      "digital_purge": {
+        "close_browser_tabs": false,
+        "launch_applications": ["/Applications/Figma.app"],
+        "kill_background_processes": []
       },
-      "lighting": {
-        "hex_color": "#F2C879",
-        "brightness": 70,
-        "transition_ms": 1500
+      "physical_orchestration": {
+        "lights_enabled": true,
+        "hex_color": "#FFA500",
+        "brightness": 50,
+        "hue_xy_payload": [0.526, 0.413]
       },
-      "audio": {
-        "playlist_uri": "spotify:playlist:37i9dQZF1DWZeKCadgRdKQ",
-        "shuffle": true,
-        "volume_percent": 35
-      },
-      "browser_action": "NONE"
+      "sonic_layering": {
+        "spotify_enabled": true,
+        "playlist_uri": "spotify:playlist:37i9dQZF1DWWQRwui0ExPm",
+        "target_frequency_profile": "Deep Lofi Beats"
+      }
     },
     {
       "id": "high_energy",
-      "label": "High Energy",
-      "description": "Shipping sprint. Everything open, saturated light, loud.",
-      "applications": {
-        "darwin": [
-          "/Applications/Visual Studio Code.app",
-          "/Applications/Slack.app",
-          "/Applications/Linear.app",
-          "/Applications/Spotify.app"
-        ],
-        "win32": [
-          "C:\\Users\\Public\\Desktop\\Visual Studio Code.lnk",
-          "C:\\Users\\Public\\Desktop\\Slack.lnk",
-          "C:\\Users\\Public\\Desktop\\Spotify.lnk"
-        ],
-        "linux": [
-          "/usr/share/applications/code.desktop",
-          "/usr/share/applications/slack.desktop",
-          "/usr/share/applications/spotify.desktop"
-        ]
+      "name": "High Energy",
+      "digital_purge": {
+        "close_browser_tabs": true,
+        "launch_applications": ["/Applications/Notion.app"],
+        "kill_background_processes": []
       },
-      "lighting": {
-        "hex_color": "#FF3D6E",
-        "brightness": 100,
-        "transition_ms": 400
+      "physical_orchestration": {
+        "lights_enabled": true,
+        "hex_color": "#FF0000",
+        "brightness": 80,
+        "hue_xy_payload": [0.674, 0.314]
       },
-      "audio": {
-        "playlist_uri": "spotify:playlist:37i9dQZF1DX76Wlfdnj7AP",
-        "shuffle": true,
-        "volume_percent": 75
-      },
-      "browser_action": "HYDRATE_SESSION"
+      "sonic_layering": {
+        "spotify_enabled": true,
+        "playlist_uri": "spotify:playlist:37i9dQZF1DWWQRwui0ExPl",
+        "target_frequency_profile": "High Tempo Synthwave"
+      }
     },
     {
       "id": "late_night_chill",
-      "label": "Late Night Chill",
-      "description": "Wind-down. Reading and music only, dim amber light, low volume.",
-      "applications": {
-        "darwin": [
-          "/Applications/Spotify.app",
-          "/Applications/Books.app"
-        ],
-        "win32": [
-          "C:\\Users\\Public\\Desktop\\Spotify.lnk"
-        ],
-        "linux": [
-          "/usr/share/applications/spotify.desktop"
-        ]
+      "name": "Late Night Chill",
+      "digital_purge": {
+        "close_browser_tabs": false,
+        "launch_applications": [],
+        "kill_background_processes": ["VSCode", "iTerm"]
       },
-      "lighting": {
-        "hex_color": "#8A3B12",
-        "brightness": 25,
-        "transition_ms": 3000
+      "physical_orchestration": {
+        "lights_enabled": true,
+        "hex_color": "#8A2BE2",
+        "brightness": 15,
+        "hue_xy_payload": [0.245, 0.098]
       },
-      "audio": {
-        "playlist_uri": "spotify:playlist:37i9dQZF1DX4WYpdgoIcn6",
-        "shuffle": true,
-        "volume_percent": 25
-      },
-      "browser_action": "HYDRATE_SESSION"
+      "sonic_layering": {
+        "spotify_enabled": true,
+        "playlist_uri": "spotify:playlist:37i9dQZF1DWWQRwui0ExPk",
+        "target_frequency_profile": "Ambient Wind Down"
+      }
     }
   ]
 }
