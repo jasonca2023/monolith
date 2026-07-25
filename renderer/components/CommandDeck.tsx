@@ -4,6 +4,7 @@ import type {
   MonolithConfig,
   Profile,
   RealityShiftReport,
+  SessionStats,
 } from "../monolith";
 import CredentialsModal, { isUnconfigured } from "./CredentialsModal";
 import ProfileEditor, { emptyProfile } from "./ProfileEditor";
@@ -90,8 +91,12 @@ function summarize(profile: Profile): string {
   const purge = profile.digital_purge;
   const bits: string[] = [];
   if (purge.launch_applications.length > 0) bits.push(`${purge.launch_applications.length} apps`);
-  if (purge.kill_background_processes.length > 0) {
-    bits.push(`quits ${purge.kill_background_processes.length}`);
+  const killCount = purge.kill_background_processes.length;
+  if (killCount > 0 || purge.kill_categories.length > 0) {
+    // Categories resolve to a different count per machine, so only the named
+    // list gets an exact number — a category-only mood still needs to say
+    // something, or it reads as doing nothing at all.
+    bits.push(killCount > 0 ? `blocks ${killCount}` : "blocks apps");
   }
   if (purge.close_browser_tabs) bits.push("clears tabs");
   if (purge.block_distractions) bits.push("blocks sites");
@@ -111,6 +116,7 @@ export default function CommandDeck(): React.JSX.Element {
   const [isWaving, setIsWaving] = useState(false);
   const [logLines, setLogLines] = useState<LogLine[]>([]);
   const [showActivity, setShowActivity] = useState(false);
+  const [stats, setStats] = useState<SessionStats | null>(null);
   const [showCredentials, setShowCredentials] = useState(false);
   const [credentialsDismissed, setCredentialsDismissed] = useState(false);
   const [editing, setEditing] = useState<{ profile: Profile; isNew: boolean } | null>(null);
@@ -157,6 +163,12 @@ export default function CommandDeck(): React.JSX.Element {
     });
   }, []);
 
+  /** The user's own numbers, next to the research citations. */
+  const refreshStats = useCallback(async () => {
+    const loaded = await window.monolith?.readStats();
+    if (loaded) setStats(loaded);
+  }, []);
+
   /* ---------------------------------------------------------------------- */
   /* Boot                                                                    */
   /* ---------------------------------------------------------------------- */
@@ -191,6 +203,7 @@ export default function CommandDeck(): React.JSX.Element {
           },
           { tone: "network", text: "Waiting for the browser to connect." },
         ]);
+        void refreshStats();
       } catch (error) {
         if (cancelled) return;
         appendLog([{ tone: "error", text: `Couldn't load your moods: ${String(error)}` }]);
@@ -234,10 +247,32 @@ export default function CommandDeck(): React.JSX.Element {
         case "BLOCKADE_RELEASED":
           appendLog([{ tone: "success", text: "Site blocking turned off." }]);
           break;
+        case "BLOCKADE_KILL": {
+          const target = typeof payload.target === "string" ? payload.target : "an app";
+          appendLog([{ tone: "warn", text: `${target} was reopened — closed it again.` }]);
+          break;
+        }
         case "SIGNAL_FAILED":
           appendLog([
             { tone: "error", text: `Couldn't reach the browser: ${payload.error ?? "unknown error"}` },
           ]);
+          break;
+        case "EXTERNAL_ENGAGE": {
+          const profileId = typeof payload.profileId === "string" ? payload.profileId : null;
+          const profileName = typeof payload.profileName === "string" ? payload.profileName : "A mood";
+          if (profileId) {
+            setActiveId(profileId);
+            setEngagedId(profileId);
+          }
+          appendLog([{ tone: "success", text: `${profileName} engaged from the menu bar.` }]);
+          break;
+        }
+        case "EXTERNAL_DISENGAGE":
+          setEngagedId(null);
+          appendLog([{ tone: "success", text: "Disengaged from the menu bar." }]);
+          break;
+        case "STATS_UPDATED":
+          void refreshStats();
           break;
         default:
           break;
@@ -248,7 +283,7 @@ export default function CommandDeck(): React.JSX.Element {
       cancelled = true;
       unsubscribe();
     };
-  }, [appendLog]);
+  }, [appendLog, refreshStats]);
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -626,7 +661,7 @@ export default function CommandDeck(): React.JSX.Element {
                 />
               </div>
               <div className="lg:col-span-2">
-                <StatsTerminal />
+                <StatsTerminal stats={stats} />
               </div>
             </div>
           </div>
@@ -860,10 +895,31 @@ function ProfileCard({
   );
 }
 
-/** The research that motivates the app, framed as short, sourced facts. */
-function StatsTerminal(): React.JSX.Element {
+/** One number and its label — a cell in the personal-stats row. */
+function StatCell({ value, label }: { value: string; label: string }): React.JSX.Element {
+  return (
+    <div className="flex flex-col items-center gap-0.5">
+      <span className="font-display text-xl font-semibold text-slate-100">{value}</span>
+      <span className="text-[11px] text-slate-500">{label}</span>
+    </div>
+  );
+}
+
+/**
+ * The research citations argue in the abstract; this makes the same case
+ * with the user's own numbers, so it isn't just someone else's study.
+ */
+function StatsTerminal({ stats }: { stats: SessionStats | null }): React.JSX.Element {
   return (
     <aside className="flex flex-col overflow-hidden rounded-2xl border border-[#1e1e1e] bg-[#0a0a0f]">
+      {stats && stats.totalSessions > 0 && (
+        <div className="grid grid-cols-4 gap-2 border-b border-[#1e1e1e] px-4 py-4">
+          <StatCell value={`${stats.todayMinutes}m`} label="today" />
+          <StatCell value={String(stats.streakDays)} label="day streak" />
+          <StatCell value={String(stats.totalSessions)} label="sessions" />
+          <StatCell value={String(stats.totalBlocks)} label="blocked" />
+        </div>
+      )}
       <div className="border-b border-[#1e1e1e] px-4 py-3">
         <span className="text-xs font-medium text-slate-400">Why this matters</span>
       </div>

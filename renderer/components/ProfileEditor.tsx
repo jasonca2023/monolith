@@ -212,8 +212,8 @@ export default function ProfileEditor({
           </Section>
 
           <Section
-            title="Apps to close"
-            caption="Closed to clear the decks. Type each app's name as it shows up when it's running — some apps go by a different name than their icon (iTerm shows up as “iTerm2”, for example)."
+            title="Apps to block"
+            caption="Closed the moment this mood starts, and kept closed — reopening one just closes it again until you leave this mood. Type each app's name as it shows up when it's running (iTerm shows up as “iTerm2”, for example)."
           >
             <textarea
               rows={2}

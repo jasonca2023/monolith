@@ -22,6 +22,7 @@ const api: MonolithApi = {
   authorizeSpotify: () => ipcRenderer.invoke('spotify:authorize'),
   discoverHueBridges: () => ipcRenderer.invoke('hue:discover'),
   pairHueBridge: (ip) => ipcRenderer.invoke('hue:pair', ip),
+  readStats: () => ipcRenderer.invoke('stats:read'),
   onBridgeEvent: (listener) => {
     const handler = (_event: IpcRendererEvent, payload: BridgeEvent) => listener(payload);
     ipcRenderer.on('bridge:event', handler);

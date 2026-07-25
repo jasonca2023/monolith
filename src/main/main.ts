@@ -10,7 +10,7 @@
  *   4. The configuration store for monolith_config.json.
  */
 
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, shell, Tray } from 'electron';
 import { exec } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -26,6 +26,8 @@ import {
 } from './actuators';
 import { setSystemFocus } from './focus-mode';
 import { discoverApps, resolveTargets } from './app-catalog';
+import { ProcessBlockade } from './blockade';
+import { summarizeSessions, trimSessions, type SessionRecord } from './sessions';
 import { discoverBridges, pairWithBridge } from './hue-setup';
 import { authorize, isExpired, refreshTokens, type SpotifyTokens } from './spotify-auth';
 import { isRecord, normalizeConfig, normalizeProfile } from './normalize';
@@ -54,6 +56,7 @@ import type {
   PhysicalOrchestration,
   Profile,
   RealityShiftReport,
+  SessionStats,
   SonicLayering,
   SpotifyAuthResult,
   UserSettings,
@@ -71,6 +74,7 @@ const BRIDGE_HEARTBEAT_MS = 30_000;
 const LAUNCH_TIMEOUT_MS = 15_000;
 const KILL_TIMEOUT_MS = 10_000;
 const CONFIG_FILENAME = 'monolith_config.json';
+const SESSIONS_FILENAME = 'monolith_sessions.json';
 
 /** How long a SIGTERM gets to land before force_quit escalates to SIGKILL. */
 const FORCE_QUIT_GRACE_MS = 1500;
@@ -196,6 +200,52 @@ class ConfigStore {
       }
     }
     return null;
+  }
+}
+
+/**
+ * Session history, mirroring ConfigStore's durability but with nothing to
+ * seed — there is no template for a user's own usage, so a missing or
+ * corrupt file just starts from an empty history rather than falling back to
+ * a default.
+ */
+class SessionStore {
+  private cache: SessionRecord[] | null = null;
+
+  private get path(): string {
+    return path.join(app.getPath('userData'), SESSIONS_FILENAME);
+  }
+
+  async read(): Promise<SessionRecord[]> {
+    if (this.cache) return this.cache;
+
+    try {
+      const raw = await fs.readFile(this.path, 'utf8');
+      const parsed = JSON.parse(raw);
+      this.cache = Array.isArray(parsed) ? parsed : [];
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT') {
+        log('warn', 'stats', 'session history unreadable, starting fresh', describeError(error));
+      }
+      this.cache = [];
+    }
+    return this.cache;
+  }
+
+  async append(record: SessionRecord): Promise<void> {
+    const next = trimSessions([...(await this.read()), record]);
+    const target = this.path;
+    const scratch = `${target}.tmp`;
+
+    try {
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.writeFile(scratch, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
+      await fs.rename(scratch, target);
+      this.cache = next;
+    } catch (error) {
+      log('error', 'stats', 'could not save this session', describeError(error));
+    }
   }
 }
 
@@ -480,12 +530,7 @@ class OrchestrationBridge {
 
     const envelope = parsed as Partial<BridgeEnvelope>;
     log('info', 'bridge', `extension reported "${envelope.type ?? 'UNKNOWN'}"`, envelope.payload);
-
-    for (const window of BrowserWindow.getAllWindows()) {
-      if (!window.isDestroyed()) {
-        window.webContents.send('bridge:event', parsed);
-      }
-    }
+    broadcastToRenderer(parsed);
   }
 }
 
@@ -495,6 +540,30 @@ class OrchestrationBridge {
 
 const configStore = new ConfigStore();
 const bridge = new OrchestrationBridge();
+
+/**
+ * Keeps a mood's "apps to close" list closed for as long as the mood stays
+ * engaged, rather than quitting once and leaving the door open. Only one mood
+ * is ever engaged at a time, so a single shared enforcer is enough — starting
+ * it always replaces whatever the previous mood was blocking.
+ */
+const sessionStore = new SessionStore();
+
+/**
+ * The mood currently engaged, tracked here rather than only in the renderer's
+ * React state — the renderer is what the user clicks, but session recording
+ * and the tray/hotkey (below) both need to know this from the main process,
+ * which is the only side with an accurate start time and the only side that
+ * can write the session file.
+ */
+let currentSession: { profileId: string; profileName: string; startedAtMs: number } | null = null;
+let sessionBlocks = 0;
+
+const blockade = new ProcessBlockade(killProcess, (target) => {
+  log('info', 'kill', `"${target}" reopened — closed again`);
+  sessionBlocks += 1;
+  broadcastToRenderer({ type: 'BLOCKADE_KILL', payload: { target } });
+});
 
 /* -------------------------------------------------------------------------- */
 /* Spotify credentials                                                         */
@@ -623,6 +692,13 @@ async function executeRealityShift(payload: unknown): Promise<RealityShiftReport
 
   const { close_browser_tabs, force_quit } = profile.digital_purge;
 
+  // A session is scoped to one engaged mood. Overwriting a dangling one here
+  // (engage-without-disengage, e.g. a crash) discards it silently rather than
+  // stitching two moods into one record.
+  currentSession = { profileId: profile.id, profileName: profile.name, startedAtMs: Date.now() };
+  sessionBlocks = 0;
+  lastProfileId = profile.id;
+
   // Names and categories become real paths and process names here, against what
   // this machine actually has installed.
   const { apps, urls, processes: kills, unresolved } = resolveTargets(
@@ -654,6 +730,12 @@ async function executeRealityShift(payload: unknown): Promise<RealityShiftReport
     applyAudio(profile.sonic_layering, spotifyCredentials, openPlaylistInSpotify),
     setSystemFocus(true),
   ]);
+
+  // Engaging always replaces whatever the previous mood was blocking — a
+  // mood with nothing to close (kills.length === 0) still clears it.
+  blockade.start(kills, force_quit);
+  if (blockade.active) log('info', 'kill', `blocking ${kills.length} app(s) from reopening while engaged`);
+  void refreshTray();
 
   log('info', 'iot', `lighting ${physicalResult.status}: ${physicalResult.detail}`);
   log('info', 'sonic', `audio ${sonicResult.status}: ${sonicResult.detail}`);
@@ -759,6 +841,28 @@ async function executeDisengage(profileId: unknown): Promise<DisengageReport> {
 
   log('info', 'shift', `disengaging "${id}" — restoring neutral state`);
 
+  // Whatever this mood was blocking is free to reopen the moment it's over.
+  blockade.stop();
+
+  // Fire-and-forget: a slow disk write must not delay lights/focus/tabs
+  // coming back, and a failure here is logged, never surfaced as a shift error.
+  if (currentSession) {
+    const finished = currentSession;
+    currentSession = null;
+    void sessionStore
+      .append({
+        profileId: finished.profileId,
+        profileName: finished.profileName,
+        startedAt: new Date(finished.startedAtMs).toISOString(),
+        endedAt: new Date().toISOString(),
+        durationMs: Date.now() - finished.startedAtMs,
+        appsBlocked: sessionBlocks,
+      })
+      .then(() => broadcastToRenderer({ type: 'STATS_UPDATED' }));
+    sessionBlocks = 0;
+  }
+  void refreshTray();
+
   const settings = (await configStore.read()).user_settings;
 
   const [focusResult, physicalResult] = await Promise.all([
@@ -818,6 +922,18 @@ function emptyReport(startedAt: Date, error: string): RealityShiftReport {
 /* -------------------------------------------------------------------------- */
 
 let mainWindow: BrowserWindow | null = null;
+
+/**
+ * Pushes an event to every open window over the same `bridge:event` channel
+ * the extension's own acknowledgements use — the process blockade's re-kill
+ * notices ride this too, so they land in the renderer next to
+ * PURGE_COMPLETE/HYDRATE_COMPLETE rather than a second channel.
+ */
+function broadcastToRenderer(payload: unknown): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) window.webContents.send('bridge:event', payload);
+  }
+}
 
 const FALLBACK_RENDERER = `data:text/html;charset=utf-8,${encodeURIComponent(
   `<!doctype html><meta charset="utf-8"><title>Monolith</title>
@@ -883,6 +999,111 @@ function safeProtocol(url: string): string {
   } catch {
     return '';
   }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Menu bar tray and global hotkey                                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A window the user has to find and click into is the difference between a
+ * background utility and something that just happens to run in Electron. The
+ * tray icon and the hotkey are both ways to engage/disengage without ever
+ * bringing the window forward.
+ */
+
+let tray: Tray | null = null;
+/** Remembered so the hotkey has something to re-engage after a disengage. */
+let lastProfileId: string | null = null;
+
+const TOGGLE_HOTKEY = 'CommandOrControl+Shift+M';
+
+function showMainWindow(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    mainWindow = createMainWindow();
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+/**
+ * Engages `lastProfileId` if nothing is currently engaged, or falls back to
+ * the first configured mood the first time this runs in a session — the
+ * hotkey has no UI to ask "which mood?", so it needs a reasonable default.
+ */
+async function engageFromOutsideWindow(): Promise<void> {
+  const targetId = lastProfileId ?? (await configStore.read()).profiles[0]?.id;
+  if (!targetId) return;
+
+  const report = await executeRealityShift(targetId);
+  broadcastToRenderer({
+    type: 'EXTERNAL_ENGAGE',
+    payload: { profileId: targetId, profileName: report.profileName },
+  });
+  await refreshTray();
+}
+
+async function disengageFromOutsideWindow(): Promise<void> {
+  const targetId = currentSession?.profileId ?? lastProfileId ?? 'default';
+  await executeDisengage(targetId);
+  broadcastToRenderer({ type: 'EXTERNAL_DISENGAGE', payload: { profileId: targetId } });
+  await refreshTray();
+}
+
+/**
+ * Rebuilt after every engage/disengage — from the tray, the hotkey, or the
+ * window — since Electron menus are static once set and the mood list itself
+ * can change whenever the user edits their moods.
+ */
+async function refreshTray(): Promise<void> {
+  if (!tray) return;
+
+  const config = await configStore.read().catch(() => null);
+  const profiles = config?.profiles ?? [];
+  const engaged = currentSession;
+
+  tray.setToolTip(engaged ? `Monolith — ${engaged.profileName} engaged` : 'Monolith');
+
+  const menu = Menu.buildFromTemplate([
+    {
+      label: engaged ? `Engaged — ${engaged.profileName}` : 'Neutral — nothing engaged',
+      enabled: false,
+    },
+    { type: 'separator' },
+    ...(engaged
+      ? [{ label: 'Disengage', click: () => void disengageFromOutsideWindow() }]
+      : profiles.map((profile) => ({
+          label: `Engage ${profile.name}`,
+          click: () => void executeRealityShift(profile.id).then(async () => {
+            broadcastToRenderer({
+              type: 'EXTERNAL_ENGAGE',
+              payload: { profileId: profile.id, profileName: profile.name },
+            });
+            await refreshTray();
+          }),
+        }))),
+    { type: 'separator' },
+    { label: 'Open Monolith', click: () => showMainWindow() },
+    { type: 'separator' },
+    { label: 'Quit Monolith', click: () => app.quit() },
+  ]);
+
+  tray.setContextMenu(menu);
+}
+
+function createTray(): void {
+  const iconPath = path.join(
+    app.getAppPath(),
+    'assets',
+    process.platform === 'darwin' ? 'trayIconTemplate.png' : 'trayIconTemplate@2x.png',
+  );
+  const icon = nativeImage.createFromPath(iconPath);
+  tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon);
+  tray.setToolTip('Monolith');
+  tray.on('click', () => showMainWindow());
+  void refreshTray();
 }
 
 async function loadRenderer(window: BrowserWindow): Promise<void> {
@@ -1080,6 +1301,10 @@ function registerIpcHandlers(): void {
     return { ok: false, status: 'failed', detail: outcome.detail };
   });
 
+  ipcMain.handle('stats:read', async (): Promise<SessionStats> => {
+    return summarizeSessions(await sessionStore.read());
+  });
+
   ipcMain.handle('system:info', async () => ({
     platform: process.platform,
     arch: process.arch,
@@ -1133,6 +1358,14 @@ if (!app.requestSingleInstanceLock()) {
     });
 
     mainWindow = createMainWindow();
+    createTray();
+
+    const registered = globalShortcut.register(TOGGLE_HOTKEY, () => {
+      void (currentSession ? disengageFromOutsideWindow() : engageFromOutsideWindow());
+    });
+    if (!registered) {
+      log('warn', 'shell', `could not register the ${TOGGLE_HOTKEY} hotkey — likely already in use`);
+    }
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) mainWindow = createMainWindow();
@@ -1143,6 +1376,7 @@ if (!app.requestSingleInstanceLock()) {
     if (process.platform !== 'darwin') app.quit();
   });
 
+  app.on('will-quit', () => globalShortcut.unregisterAll());
   app.on('before-quit', () => bridge.stop());
 }
 

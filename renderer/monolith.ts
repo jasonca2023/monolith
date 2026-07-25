@@ -28,6 +28,7 @@ export type {
   PhysicalOrchestration,
   Profile,
   RealityShiftReport,
+  SessionStats,
   SonicLayering,
   SpotifyAuthResult,
   SystemInfo,

@@ -58,6 +58,15 @@ export interface HuePairResult {
   detail: string;
 }
 
+/** The user's own numbers, next to the "Why this matters" research citations. */
+export interface SessionStats {
+  totalSessions: number;
+  totalFocusMinutes: number;
+  totalBlocks: number;
+  todayMinutes: number;
+  streakDays: number;
+}
+
 /**
  * Categories a mood can name instead of individual apps. Resolved against what
  * is actually installed at shift time, so "quit every game" travels between
@@ -277,6 +286,8 @@ export interface MonolithApi {
   discoverHueBridges(): Promise<HueDiscoveryResult>;
   /** Waits for the bridge's link button, then stores the minted key. */
   pairHueBridge(ip: string): Promise<HuePairResult>;
+  /** Aggregates the user's own session history — no research citation needed. */
+  readStats(): Promise<SessionStats>;
   onBridgeEvent(listener: (event: BridgeEvent) => void): () => void;
   /** The shell is frameless, so the renderer owns the window controls. */
   window: {
