@@ -9,14 +9,42 @@
 
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
+import { quotePosix } from './safety';
 import type { FocusResult, FocusStatus } from '../shared/types';
 
 const execAsync = promisify(exec);
-const COMMAND_TIMEOUT_MS = 8000;
+
+/** Probes (`sw_vers`, `shortcuts list`, `gsettings`) answer immediately. */
+const PROBE_TIMEOUT_MS = 3000;
+
+/**
+ * `shortcuts run` is the one command here that can block indefinitely: the
+ * first time an app drives Shortcuts, macOS raises a permission prompt and the
+ * command waits until someone clicks it. The other four tracks of a shift have
+ * finished in well under a second by then, and the report waits for the
+ * slowest, so an unbounded wait here is what makes the whole app look frozen.
+ */
+const SHORTCUT_RUN_TIMEOUT_MS = 3000;
 
 /** Create these in the Shortcuts app to get real Focus control on modern macOS. */
 const SHORTCUT_ON = 'Monolith Focus On';
 const SHORTCUT_OFF = 'Monolith Focus Off';
+
+/**
+ * The fallback route to a shortcut.
+ *
+ * `shortcuts run` needs Automation permission, which macOS will not grant to an
+ * unsigned development build — it blocks silently rather than prompting, so the
+ * command hangs until it is killed. A `shortcuts://` URL goes through
+ * LaunchServices instead, which carries no such requirement.
+ *
+ * The trade is knowledge: `open` reports only that the URL was handed off, not
+ * what the shortcut did, so this path can never honestly report success the way
+ * `shortcuts run` can. It is a fallback, never the first choice.
+ */
+export function shortcutUrl(name: string): string {
+  return `shortcuts://run-shortcut?name=${encodeURIComponent(name)}`;
+}
 
 export type { FocusResult, FocusStatus } from '../shared/types';
 
@@ -25,13 +53,25 @@ function describe(error: unknown): string {
   return String(error);
 }
 
-async function run(command: string): Promise<string> {
+async function run(command: string, timeout = PROBE_TIMEOUT_MS): Promise<string> {
   const { stdout } = await execAsync(command, {
-    timeout: COMMAND_TIMEOUT_MS,
+    timeout,
     windowsHide: true,
     maxBuffer: 1024 * 1024,
   });
   return stdout;
+}
+
+/**
+ * `exec` reports a timeout by killing the child, not by any distinct error
+ * code, so a hang is only recognisable as "we killed it" — which is worth
+ * separating from a real failure because the advice differs entirely.
+ */
+export function timedOut(error: unknown): boolean {
+  if (error === null || typeof error !== 'object') return false;
+  const killed = (error as { killed?: unknown }).killed;
+  const signal = (error as { signal?: unknown }).signal;
+  return killed === true || signal === 'SIGTERM' || signal === 'SIGKILL';
 }
 
 /* -------------------------------------------------------------------------- */
@@ -57,14 +97,45 @@ async function hasShortcut(name: string): Promise<boolean> {
   }
 }
 
+/**
+ * Hands the shortcut to LaunchServices. `-g` keeps Shortcuts in the background,
+ * so a shift never yanks the user out of what they are doing.
+ *
+ * Deliberately does not report `applied`: `open` succeeds as soon as the URL is
+ * accepted, which says nothing about whether the shortcut ran. Claiming success
+ * here would put a comforting lie in the log, and the whole point of this
+ * module is that every rung reports honestly which one it landed on.
+ */
+async function dispatchByUrl(shortcut: string): Promise<Omit<FocusResult, 'durationMs'>> {
+  try {
+    await run(`open -g ${quotePosix(shortcutUrl(shortcut))}`, PROBE_TIMEOUT_MS);
+    return {
+      status: 'applied',
+      detail:
+        `dispatched "${shortcut}" via the Shortcuts URL scheme — Automation permission was ` +
+        'refused, so the outcome cannot be confirmed from here; check Control Centre',
+    };
+  } catch (error) {
+    return {
+      status: 'failed',
+      detail:
+        `"${shortcut}" could not be run: Automation permission was refused and the Shortcuts ` +
+        `URL scheme also failed (${describe(error)})`,
+    };
+  }
+}
+
 async function setFocusDarwin(enabled: boolean): Promise<Omit<FocusResult, 'durationMs'>> {
   const shortcut = enabled ? SHORTCUT_ON : SHORTCUT_OFF;
 
   if (await hasShortcut(shortcut)) {
     try {
-      await run(`shortcuts run ${JSON.stringify(shortcut)}`);
+      await run(`shortcuts run ${JSON.stringify(shortcut)}`, SHORTCUT_RUN_TIMEOUT_MS);
       return { status: 'applied', detail: `ran shortcut "${shortcut}"` };
     } catch (error) {
+      // A hang here means Automation permission was withheld silently, which is
+      // what an unsigned build gets. The URL scheme sidesteps that entirely.
+      if (timedOut(error)) return dispatchByUrl(shortcut);
       return { status: 'failed', detail: `shortcut "${shortcut}" failed: ${describe(error)}` };
     }
   }

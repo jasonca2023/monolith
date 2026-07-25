@@ -4,8 +4,8 @@
     "spotify_client_id": "",
     "spotify_refresh_token": "",
     "spotify_token_expires_at": 0,
-    "hue_bridge_ip": "192.168.1.50",
-    "hue_api_key": "AUTHORIZED_LOCAL_HUE_DEVELOPER_HASH"
+    "hue_bridge_ip": "",
+    "hue_api_key": ""
   },
   "profiles": [
     {
@@ -15,15 +15,15 @@
       "digital_purge": {
         "close_browser_tabs": true,
         "launch_applications": [
-          "/Applications/Visual Studio Code.app",
-          "/Applications/iTerm.app",
-          "C:\\Program Files\\Git\\git-bash.exe"
+          "/Applications/Cursor.app",
+          "/Applications/Visual Studio Code.app"
         ],
         "kill_background_processes": [
-          "Slack",
-          "Discord",
-          "Steam",
-          "AdobeUpdateService"
+          "Music",
+          "Messages",
+          "Microsoft Teams",
+          "Microsoft Outlook",
+          "zoom.us"
         ],
         "block_distractions": true,
         "blocked_domains": [
@@ -42,10 +42,7 @@
         "lights_enabled": true,
         "hex_color": "#0000FF",
         "brightness": 35,
-        "hue_xy_payload": [
-          0.157,
-          0.018
-        ]
+        "hue_xy_payload": [0.157, 0.018]
       },
       "sonic_layering": {
         "spotify_enabled": true,
@@ -60,7 +57,8 @@
       "digital_purge": {
         "close_browser_tabs": false,
         "launch_applications": [
-          "/Applications/Figma.app"
+          "/System/Applications/Freeform.app",
+          "/System/Applications/Notes.app"
         ],
         "kill_background_processes": [],
         "block_distractions": false,
@@ -70,10 +68,7 @@
         "lights_enabled": true,
         "hex_color": "#FFA500",
         "brightness": 50,
-        "hue_xy_payload": [
-          0.526,
-          0.413
-        ]
+        "hue_xy_payload": [0.526, 0.413]
       },
       "sonic_layering": {
         "spotify_enabled": true,
@@ -88,9 +83,12 @@
       "digital_purge": {
         "close_browser_tabs": true,
         "launch_applications": [
-          "/Applications/Notion.app"
+          "/System/Applications/Music.app"
         ],
-        "kill_background_processes": [],
+        "kill_background_processes": [
+          "Microsoft Outlook",
+          "Microsoft Teams"
+        ],
         "block_distractions": true,
         "blocked_domains": [
           "youtube.com",
@@ -102,10 +100,7 @@
         "lights_enabled": true,
         "hex_color": "#FF0000",
         "brightness": 80,
-        "hue_xy_payload": [
-          0.674,
-          0.314
-        ]
+        "hue_xy_payload": [0.674, 0.314]
       },
       "sonic_layering": {
         "spotify_enabled": true,
@@ -119,10 +114,14 @@
       "builtin": true,
       "digital_purge": {
         "close_browser_tabs": false,
-        "launch_applications": [],
+        "launch_applications": [
+          "/System/Applications/Podcasts.app"
+        ],
         "kill_background_processes": [
-          "VSCode",
-          "iTerm"
+          "Cursor",
+          "Code",
+          "Xcode",
+          "Sourcetree"
         ],
         "block_distractions": false,
         "blocked_domains": []
@@ -131,10 +130,7 @@
         "lights_enabled": true,
         "hex_color": "#8A2BE2",
         "brightness": 15,
-        "hue_xy_payload": [
-          0.245,
-          0.098
-        ]
+        "hue_xy_payload": [0.245, 0.098]
       },
       "sonic_layering": {
         "spotify_enabled": true,

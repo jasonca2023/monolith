@@ -16,6 +16,47 @@ const NEUTRAL_HEX = "#FFFFFF";
 const MUTE_TOWARD = "#3f3f46";
 const MUTE_FACTOR = 0.55;
 
+interface CrisisStat {
+  id: string;
+  headline: string;
+  body: string;
+  source: string;
+}
+
+/** The case for the app, in its own words. Cited so the claims are checkable. */
+const CRISIS_STATS: CrisisStat[] = [
+  {
+    id: "cognitive-drain",
+    headline: "COGNITIVE DRAIN EFFICIENCY DETECTED",
+    body: "Up to 40% of productive time is lost daily to task shifting and setup friction rituals.",
+    source: "American Psychological Association",
+  },
+  {
+    id: "system-overload",
+    headline: "SYSTEM OVERLOAD WARNING",
+    body: "Knowledge workers lose an average of 2 hours per day to workplace distractions, draining $650 Billion annually from the US Economy.",
+    source: "Speakwise Index",
+  },
+  {
+    id: "recovery-threshold",
+    headline: "DISRUPTION RECOVERY THRESHOLD",
+    body: "It takes an average of 23 minutes and 15 seconds to fully refocus after a single digital workplace disruption.",
+    source: "Dr. Gloria Mark, UC Irvine",
+  },
+  {
+    id: "clutter-factor",
+    headline: "DIGITAL CLUTTER FACTOR",
+    body: "Modern workers toggle between browser tabs and applications up to 1,200 times per day, wasting 3.6 hours per week in context switching.",
+    source: "Asana & Harvard Business Review",
+  },
+  {
+    id: "fragmentation-coefficient",
+    headline: "FRAGMENTATION COEFFICIENT",
+    body: "The average uninterrupted focus session on an un-orchestrated desktop workspace lasts an abysmal 13 minutes and 7 seconds.",
+    source: "ActivTrak State of the Workplace study",
+  },
+];
+
 type LogTone = "success" | "network" | "iot" | "sonic" | "warn" | "error";
 
 interface LogLine {
@@ -593,6 +634,10 @@ export default function CommandDeck(): React.JSX.Element {
                 engaged={focusMode}
               />
             </div>
+
+            <div className="mx-auto w-full max-w-4xl pb-2">
+              <StatsTerminal />
+            </div>
           </div>
         )}
 
@@ -824,6 +869,35 @@ function ProfileCard({
         Edit
       </button>
     </div>
+  );
+}
+
+/**
+ * The Context Crisis Telemetry panel: the research that motivates the app,
+ * rendered as terminal output so it reads as instrumentation rather than
+ * marketing copy.
+ */
+function StatsTerminal(): React.JSX.Element {
+  return (
+    <aside className="flex flex-col overflow-hidden rounded-2xl border border-[#1e1e1e] bg-[#0a0a0a]">
+      <div className="flex items-center gap-2 border-b border-[#1e1e1e] px-4 py-3">
+        <span className="h-2.5 w-2.5 rounded-full bg-red-500/70" />
+        <span className="h-2.5 w-2.5 rounded-full bg-amber-500/70" />
+        <span className="h-2.5 w-2.5 rounded-full bg-emerald-500/70" />
+        <span className="ml-2 text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-500">
+          Context Crisis Telemetry
+        </span>
+      </div>
+      <div className="command-deck-scroll grid gap-4 px-4 py-4 font-mono text-[11px] leading-relaxed sm:grid-cols-2">
+        {CRISIS_STATS.map((stat) => (
+          <div key={stat.id} className="border-l-2 border-red-500/40 pl-3">
+            <p className="font-semibold uppercase tracking-wide text-red-400">{stat.headline}:</p>
+            <p className="mt-1 text-slate-300">{stat.body}</p>
+            <p className="mt-1 text-slate-600">(Source: {stat.source})</p>
+          </div>
+        ))}
+      </div>
+    </aside>
   );
 }
 
