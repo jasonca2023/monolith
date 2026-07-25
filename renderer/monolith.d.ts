@@ -59,6 +59,14 @@ export interface BrowserDispatchResult {
   error?: string;
 }
 
+export type ActuationStatus = 'applied' | 'disabled' | 'not_configured' | 'failed';
+
+export interface ActuationResult {
+  status: ActuationStatus;
+  detail: string;
+  durationMs: number;
+}
+
 export interface RealityShiftReport {
   ok: boolean;
   profileId: string;
@@ -75,6 +83,8 @@ export interface RealityShiftReport {
   browser: BrowserDispatchResult;
   physical_orchestration: PhysicalOrchestration | null;
   sonic_layering: SonicLayering | null;
+  physical_result: ActuationResult;
+  sonic_result: ActuationResult;
   startedAt: string;
   finishedAt: string;
   durationMs: number;

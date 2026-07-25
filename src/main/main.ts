@@ -16,6 +16,15 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
+import { applyAudio, applyLighting, type ActuationResult } from './actuators';
+import type {
+  DigitalPurge,
+  MonolithConfig,
+  PhysicalOrchestration,
+  Profile,
+  SonicLayering,
+  UserSettings,
+} from './config-types';
 
 const execAsync = promisify(exec);
 
@@ -62,43 +71,14 @@ const PROTECTED_PROCESSES = new Set([
 /* Configuration schema                                                        */
 /* -------------------------------------------------------------------------- */
 
-export interface UserSettings {
-  spotify_auth_token: string;
-  hue_bridge_ip: string;
-  hue_api_key: string;
-}
-
-export interface DigitalPurge {
-  close_browser_tabs: boolean;
-  launch_applications: string[];
-  kill_background_processes: string[];
-}
-
-export interface PhysicalOrchestration {
-  lights_enabled: boolean;
-  hex_color: string;
-  brightness: number;
-  hue_xy_payload: [number, number];
-}
-
-export interface SonicLayering {
-  spotify_enabled: boolean;
-  playlist_uri: string;
-  target_frequency_profile: string;
-}
-
-export interface Profile {
-  id: string;
-  name: string;
-  digital_purge: DigitalPurge;
-  physical_orchestration: PhysicalOrchestration;
-  sonic_layering: SonicLayering;
-}
-
-export interface MonolithConfig {
-  user_settings: UserSettings;
-  profiles: Profile[];
-}
+export type {
+  UserSettings,
+  DigitalPurge,
+  PhysicalOrchestration,
+  SonicLayering,
+  Profile,
+  MonolithConfig,
+} from './config-types';
 
 /* -------------------------------------------------------------------------- */
 /* IPC result types                                                            */
@@ -152,6 +132,10 @@ export interface RealityShiftReport {
   browser: BrowserDispatchResult;
   physical_orchestration: PhysicalOrchestration | null;
   sonic_layering: SonicLayering | null;
+  /** Outcome of the actual Hue call. */
+  physical_result: ActuationResult;
+  /** Outcome of the actual Spotify call. */
+  sonic_result: ActuationResult;
   startedAt: string;
   finishedAt: string;
   durationMs: number;
@@ -723,10 +707,21 @@ async function executeRealityShift(payload: unknown): Promise<RealityShiftReport
   const apps = Array.from(new Set(launch_applications.map((entry) => entry.trim())));
   const kills = Array.from(new Set(kill_background_processes.map((entry) => entry.trim())));
 
-  const [launchOutcomes, killOutcomes] = await Promise.all([
+  const settings = (await configStore.read()).user_settings;
+
+  // Lights and audio go out alongside the process work — a slow Hue bridge must
+  // not delay the apps the user is waiting on.
+  const [launchOutcomes, killOutcomes, physicalResult, sonicResult] = await Promise.all([
     Promise.allSettled(apps.map((target) => launchApplication(target))),
     Promise.allSettled(kills.map((target) => killProcess(target))),
+    applyLighting(profile.physical_orchestration, settings),
+    applyAudio(profile.sonic_layering, settings),
   ]);
+
+  log('info', 'iot', `lighting ${physicalResult.status}: ${physicalResult.detail}`);
+  log('info', 'sonic', `audio ${sonicResult.status}: ${sonicResult.detail}`);
+  if (physicalResult.status === 'failed') errors.push(`lighting: ${physicalResult.detail}`);
+  if (sonicResult.status === 'failed') errors.push(`audio: ${sonicResult.detail}`);
 
   const launchResults: LaunchResult[] = launchOutcomes.map((outcome, index) =>
     outcome.status === 'fulfilled'
@@ -793,6 +788,8 @@ async function executeRealityShift(payload: unknown): Promise<RealityShiftReport
     browser,
     physical_orchestration: profile.physical_orchestration,
     sonic_layering: profile.sonic_layering,
+    physical_result: physicalResult,
+    sonic_result: sonicResult,
     startedAt: startedAt.toISOString(),
     finishedAt: finishedAt.toISOString(),
     durationMs,
@@ -812,6 +809,8 @@ function emptyReport(startedAt: Date, error: string): RealityShiftReport {
     browser: { signal: 'NONE', ok: false, receivers: 0, error },
     physical_orchestration: null,
     sonic_layering: null,
+    physical_result: { status: 'failed', detail: error, durationMs: 0 },
+    sonic_result: { status: 'failed', detail: error, durationMs: 0 },
     startedAt: startedAt.toISOString(),
     finishedAt: finishedAt.toISOString(),
     durationMs: finishedAt.getTime() - startedAt.getTime(),

@@ -356,21 +356,21 @@ export default function CommandDeck(): React.JSX.Element {
             },
       );
 
-      const physical = report.physical_orchestration;
-      if (physical?.lights_enabled) {
-        lines.push({
-          tone: "iot",
-          text: `[IoT] Hue ${config?.user_settings.hue_bridge_ip || "bridge unset"} — ${physical.hex_color} @ ${physical.brightness}%, xy [${physical.hue_xy_payload.join(", ")}]. Queued: actuation not wired yet.`,
-        });
-      }
+      const physical = report.physical_result;
+      lines.push({
+        tone: physical.status === "failed" ? "error" : "iot",
+        text: `[IoT] Lighting ${physical.status.replace("_", " ")} — ${physical.detail}${
+          physical.status === "applied" ? ` (${physical.durationMs}ms)` : ""
+        }`,
+      });
 
-      const sonic = report.sonic_layering;
-      if (sonic?.spotify_enabled) {
-        lines.push({
-          tone: "sonic",
-          text: `[SONIC] ${sonic.target_frequency_profile} — ${sonic.playlist_uri}. Queued: actuation not wired yet.`,
-        });
-      }
+      const sonic = report.sonic_result;
+      lines.push({
+        tone: sonic.status === "failed" ? "error" : "sonic",
+        text: `[SONIC] Playback ${sonic.status.replace("_", " ")} — ${sonic.detail}${
+          sonic.status === "applied" ? ` (${sonic.durationMs}ms)` : ""
+        }`,
+      });
 
       return lines;
     },
