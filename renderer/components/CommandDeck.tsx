@@ -15,6 +15,8 @@ const NEUTRAL_HEX = "#FFFFFF";
 /** Neutral gray a live accent is blended toward for the pre-engage idle look. */
 const MUTE_TOWARD = "#3f3f46";
 const MUTE_FACTOR = 0.55;
+/** Deactivated mood cards read a touch more washed-out than the active one. */
+const MUTE_FACTOR_INACTIVE = 0.72;
 
 type LogTone = "success" | "network" | "iot" | "sonic" | "warn" | "error";
 
@@ -424,7 +426,14 @@ export default function CommandDeck(): React.JSX.Element {
   /* Derived display                                                         */
   /* ---------------------------------------------------------------------- */
 
-  const baseHex = focusMode ? active?.physical_orchestration.hex_color ?? accent : NEUTRAL_HEX;
+  // Pre-engage, the room previews the staged mood at the same muted intensity
+  // as the rest of the idle UI, rather than a neutral white disconnected from
+  // whatever's actually selected.
+  const baseHex = focusMode
+    ? active?.physical_orchestration.hex_color ?? accent
+    : active
+      ? mix(active.physical_orchestration.hex_color, MUTE_TOWARD, MUTE_FACTOR)
+      : NEUTRAL_HEX;
   const lights = [
     { label: "Key Light", hex: shade(baseHex, 0.75) },
     { label: "Monitor Bias", hex: baseHex },
@@ -557,9 +566,11 @@ export default function CommandDeck(): React.JSX.Element {
               <p className="text-xs uppercase tracking-widest text-slate-500">
                 {busy
                   ? "Executing…"
-                  : active
-                    ? `Neutral state — ${active.name} staged`
-                    : "No moods yet — create one below"}
+                  : config === null
+                    ? "Loading moods…"
+                    : active
+                      ? `Neutral state — ${active.name} staged`
+                      : "No moods yet — create one below"}
               </p>
             </div>
 
@@ -750,7 +761,7 @@ const NexusButton = React.forwardRef<
       onClick={onClick}
       disabled={disabled}
       aria-busy={busy}
-      className={`nexus-pulse group relative flex items-center justify-center rounded-full border-2 bg-gradient-to-b from-[#1e1e1e] to-black transition-all duration-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 ${
+      className={`nexus-pulse group relative flex items-center justify-center rounded-full border-2 bg-gradient-to-b from-[#1e1e1e] to-black transition-all duration-500 [&:not(:disabled):hover]:scale-[1.03] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 ${
         large ? "h-56 w-56 sm:h-72 sm:w-72" : "h-40 w-40 sm:h-52 sm:w-52"
       }`}
       style={
@@ -787,10 +798,11 @@ function ProfileCard({
 }): React.JSX.Element {
   const hex = profile.physical_orchestration.hex_color;
   const mutedHex = mix(hex, MUTE_TOWARD, MUTE_FACTOR);
+  const dotHex = mix(hex, MUTE_TOWARD, isActive ? MUTE_FACTOR : MUTE_FACTOR_INACTIVE);
 
   return (
     <div
-      className={`group relative flex min-h-[84px] flex-col justify-between gap-1 rounded-xl border bg-[#121212] p-3 transition-all duration-300 sm:p-4 ${
+      className={`group relative flex min-h-[84px] flex-col justify-between gap-1 rounded-xl border bg-[#121212] p-3 transition-all duration-300 hover:-translate-y-0.5 sm:p-4 ${
         isActive ? "" : "border-[#1e1e1e] hover:border-slate-600"
       }`}
       style={isActive ? { borderColor: mutedHex, boxShadow: `0 0 25px ${rgba(mutedHex, 0.35)}` } : undefined}
@@ -803,7 +815,7 @@ function ProfileCard({
         <span className="flex items-center gap-2">
           <span
             className="h-2.5 w-2.5 shrink-0 rounded-full transition-colors duration-500"
-            style={{ backgroundColor: mutedHex, boxShadow: `0 0 8px ${rgba(mutedHex, 0.7)}` }}
+            style={{ backgroundColor: dotHex, boxShadow: `0 0 8px ${rgba(dotHex, 0.7)}` }}
           />
           <span
             className="text-sm font-semibold sm:text-base transition-colors duration-500"
@@ -819,7 +831,7 @@ function ProfileCard({
         onClick={onEdit}
         aria-label={`Edit ${profile.name}`}
         title={`Edit ${profile.name}`}
-        className="absolute right-2 top-2 rounded px-1.5 py-0.5 text-[10px] uppercase tracking-widest text-slate-700 opacity-0 transition hover:text-slate-300 focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-400 group-hover:opacity-100"
+        className="absolute right-2 top-2 rounded-full border border-[#242430] bg-black/40 px-2 py-0.5 text-[10px] uppercase tracking-widest text-slate-400 opacity-60 transition hover:border-slate-500 hover:bg-black/70 hover:text-slate-100 hover:opacity-100 focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-400 group-hover:opacity-100"
       >
         Edit
       </button>

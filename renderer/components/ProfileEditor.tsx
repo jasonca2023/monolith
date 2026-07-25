@@ -150,8 +150,17 @@ export default function ProfileEditor({
       aria-labelledby="editor-title"
       className="fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto bg-black/85 p-4 backdrop-blur-sm sm:p-8"
     >
-      <div className="app-no-drag my-auto w-full max-w-xl rounded-2xl border border-[#1e1e1e] bg-[#0d0d12] p-6 shadow-2xl sm:p-8">
-        <div className="flex items-start justify-between gap-4">
+      <div className="app-no-drag relative my-auto w-full max-w-xl rounded-2xl border border-[#1e1e1e] bg-[#0d0d12] p-6 shadow-2xl sm:p-8">
+        <button
+          onClick={onCancel}
+          aria-label="Close"
+          title="Close"
+          className="absolute right-4 top-4 flex h-8 w-8 items-center justify-center rounded-full text-lg leading-none text-slate-500 transition hover:bg-white/5 hover:text-slate-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-400"
+        >
+          &#10005;
+        </button>
+
+        <div className="flex items-start justify-between gap-4 pr-10">
           <div>
             <h2 id="editor-title" className="text-lg font-semibold text-slate-100">
               {isNew ? "New mood" : `Edit ${profile.name}`}
