@@ -912,7 +912,7 @@ function StatCell({ value, label }: { value: string; label: string }): React.JSX
 function StatsTerminal({ stats }: { stats: SessionStats | null }): React.JSX.Element {
   return (
     <aside className="flex flex-col overflow-hidden rounded-2xl border border-[#1e1e1e] bg-[#0a0a0f]">
-      {stats && stats.totalSessions > 0 && (
+      {stats && (
         <div className="grid grid-cols-4 gap-2 border-b border-[#1e1e1e] px-4 py-4">
           <StatCell value={`${stats.todayMinutes}m`} label="today" />
           <StatCell value={String(stats.streakDays)} label="day streak" />
