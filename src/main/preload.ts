@@ -19,6 +19,8 @@ export interface MonolithApi {
   readConfig(): Promise<unknown>;
   writeConfig(config: unknown): Promise<unknown>;
   systemInfo(): Promise<unknown>;
+  /** Opens a native file picker; returns [] if the user cancels. */
+  pickApplications(): Promise<string[]>;
   onBridgeEvent(listener: (event: unknown) => void): () => void;
   /** The shell is frameless, so the renderer owns the window controls. */
   window: {
@@ -36,6 +38,7 @@ const api: MonolithApi = {
   readConfig: () => ipcRenderer.invoke('config:read'),
   writeConfig: (config) => ipcRenderer.invoke('config:write', config),
   systemInfo: () => ipcRenderer.invoke('system:info'),
+  pickApplications: () => ipcRenderer.invoke('dialog:pick-applications'),
   onBridgeEvent: (listener) => {
     const handler = (_event: IpcRendererEvent, payload: unknown) => listener(payload);
     ipcRenderer.on('bridge:event', handler);

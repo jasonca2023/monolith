@@ -15,6 +15,10 @@ export interface DigitalPurge {
   close_browser_tabs: boolean;
   launch_applications: string[];
   kill_background_processes: string[];
+  /** Arms the extension's redirect blockade for this mood. */
+  block_distractions: boolean;
+  /** Domains the blockade covers. Empty falls back to the worker's defaults. */
+  blocked_domains: string[];
 }
 
 export interface PhysicalOrchestration {
@@ -33,6 +37,8 @@ export interface SonicLayering {
 export interface Profile {
   id: string;
   name: string;
+  /** Ships with the app. Editable, but restored if the user removes them all. */
+  builtin: boolean;
   digital_purge: DigitalPurge;
   physical_orchestration: PhysicalOrchestration;
   sonic_layering: SonicLayering;

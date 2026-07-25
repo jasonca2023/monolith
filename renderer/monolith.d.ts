@@ -10,6 +10,8 @@ export interface DigitalPurge {
   close_browser_tabs: boolean;
   launch_applications: string[];
   kill_background_processes: string[];
+  block_distractions: boolean;
+  blocked_domains: string[];
 }
 
 export interface PhysicalOrchestration {
@@ -28,6 +30,7 @@ export interface SonicLayering {
 export interface BackendProfile {
   id: string;
   name: string;
+  builtin: boolean;
   digital_purge: DigitalPurge;
   physical_orchestration: PhysicalOrchestration;
   sonic_layering: SonicLayering;
@@ -135,6 +138,7 @@ export interface MonolithApi {
   readConfig(): Promise<MonolithConfig>;
   writeConfig(config: MonolithConfig): Promise<MonolithConfig>;
   systemInfo(): Promise<SystemInfo>;
+  pickApplications(): Promise<string[]>;
   onBridgeEvent(listener: (event: BridgeEvent) => void): () => void;
   window: {
     minimize(): Promise<void>;

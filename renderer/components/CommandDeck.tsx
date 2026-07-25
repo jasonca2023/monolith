@@ -6,92 +6,12 @@ import type {
   RealityShiftReport,
 } from "../monolith";
 import CredentialsModal, { isUnconfigured } from "./CredentialsModal";
-
-type ProfileKey = "deepWork" | "brainDump" | "highEnergy" | "lateNight";
-
-interface LightZone {
-  label: string;
-  hex: string;
-}
-
-interface Profile {
-  key: ProfileKey;
-  /** Matches the `id` of a profile in monolith_config.json. */
-  backendId: string;
-  label: string;
-  sublabel: string;
-  accent: string;
-  accentSoft: string;
-  accentDim: string;
-  ring: string;
-  textGlow: string;
-  fallbackHex: string;
-}
+import ProfileEditor, { emptyProfile } from "./ProfileEditor";
+import { rgba, shade } from "../lib/color";
 
 const WS_PORT = 8080;
-
-/**
- * Presentation layer only. Everything operational — which apps launch, which
- * processes die, light colour, playlist — is read from monolith_config.json at
- * runtime and keyed to `backendId`.
- */
-const PROFILES: Record<ProfileKey, Profile> = {
-  deepWork: {
-    key: "deepWork",
-    backendId: "deep_work",
-    label: "Deep Work",
-    sublabel: "Lockdown Focus",
-    accent: "#6366f1",
-    accentSoft: "rgba(99,102,241,0.35)",
-    accentDim: "rgba(99,102,241,0.12)",
-    ring: "border-indigo-400",
-    textGlow: "text-indigo-300",
-    fallbackHex: "#0000FF",
-  },
-  brainDump: {
-    key: "brainDump",
-    backendId: "brain_dump",
-    label: "Brain Dump",
-    sublabel: "Creative Canvas",
-    accent: "#f59e0b",
-    accentSoft: "rgba(245,158,11,0.35)",
-    accentDim: "rgba(245,158,11,0.12)",
-    ring: "border-amber-400",
-    textGlow: "text-amber-300",
-    fallbackHex: "#FFA500",
-  },
-  highEnergy: {
-    key: "highEnergy",
-    backendId: "high_energy",
-    label: "High Energy",
-    sublabel: "Operational Speed",
-    accent: "#dc2626",
-    accentSoft: "rgba(220,38,38,0.35)",
-    accentDim: "rgba(220,38,38,0.12)",
-    ring: "border-red-500",
-    textGlow: "text-red-400",
-    fallbackHex: "#FF0000",
-  },
-  lateNight: {
-    key: "lateNight",
-    backendId: "late_night_chill",
-    label: "Late Night Chill",
-    sublabel: "Decompression",
-    accent: "#a855f7",
-    accentSoft: "rgba(168,85,247,0.35)",
-    accentDim: "rgba(168,85,247,0.12)",
-    ring: "border-purple-400",
-    textGlow: "text-purple-300",
-    fallbackHex: "#8A2BE2",
-  },
-};
-
-const PROFILE_ORDER: ProfileKey[] = [
-  "deepWork",
-  "brainDump",
-  "highEnergy",
-  "lateNight",
-];
+/** Neutral State — the room glows white until a mood is engaged. */
+const NEUTRAL_HEX = "#FFFFFF";
 
 interface CrisisStat {
   id: string;
@@ -162,40 +82,49 @@ function basename(filePath: string): string {
   return last.replace(/\.(app|exe|desktop|lnk)$/i, "");
 }
 
-/** Mixes a hex colour toward black so one configured colour drives three zones. */
-function shade(hex: string, factor: number): string {
-  const match = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
-  if (!match) return hex;
-  const value = parseInt(match[1], 16);
-  const channel = (shift: number) =>
-    Math.max(0, Math.min(255, Math.round(((value >> shift) & 0xff) * factor)));
-  const toHex = (n: number) => n.toString(16).padStart(2, "0");
-  return `#${toHex(channel(16))}${toHex(channel(8))}${toHex(channel(0))}`;
+/** One line describing what a mood will actually do, for the card face. */
+function summarize(profile: BackendProfile): string {
+  const purge = profile.digital_purge;
+  const bits: string[] = [];
+  if (purge.launch_applications.length > 0) bits.push(`${purge.launch_applications.length} apps`);
+  if (purge.kill_background_processes.length > 0) {
+    bits.push(`quits ${purge.kill_background_processes.length}`);
+  }
+  if (purge.close_browser_tabs) bits.push("clears tabs");
+  if (purge.block_distractions) bits.push("blocks sites");
+  if (profile.sonic_layering.spotify_enabled) bits.push("music");
+  return bits.length > 0 ? bits.join(" · ") : "Nothing configured yet";
 }
 
 export default function CommandDeck(): React.JSX.Element {
-  const [activeKey, setActiveKey] = useState<ProfileKey>("deepWork");
   const [config, setConfig] = useState<MonolithConfig | null>(null);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  /** null is the Neutral State: nothing engaged, room white, OS untouched. */
+  const [engagedId, setEngagedId] = useState<string | null>(null);
   const [shellReady, setShellReady] = useState<boolean | null>(null);
   const [extensionOnline, setExtensionOnline] = useState(false);
   const [busy, setBusy] = useState(false);
-  /** null is the Neutral State: nothing engaged, room white, OS untouched. */
-  const [engagedId, setEngagedId] = useState<string | null>(null);
-  const [showCredentials, setShowCredentials] = useState(false);
-  const [credentialsDismissed, setCredentialsDismissed] = useState(false);
   const [waveId, setWaveId] = useState(0);
   const [isWaving, setIsWaving] = useState(false);
   const [logLines, setLogLines] = useState<LogLine[]>([]);
+  const [showCredentials, setShowCredentials] = useState(false);
+  const [credentialsDismissed, setCredentialsDismissed] = useState(false);
+  const [editing, setEditing] = useState<{ profile: BackendProfile; isNew: boolean } | null>(null);
   const logCounter = useRef(0);
   const logEndRef = useRef<HTMLDivElement | null>(null);
 
-  const active = useMemo(() => PROFILES[activeKey], [activeKey]);
+  const profiles = useMemo(() => config?.profiles ?? [], [config]);
+  const active = useMemo(
+    () => profiles.find((profile) => profile.id === activeId) ?? profiles[0] ?? null,
+    [profiles, activeId],
+  );
   const focusMode = engagedId !== null;
 
-  const backend: BackendProfile | null = useMemo(() => {
-    if (!config) return null;
-    return config.profiles.find((profile) => profile.id === active.backendId) ?? null;
-  }, [config, active.backendId]);
+  // Accents come from the mood's own colour, so a user-made mood looks native
+  // without asking anyone to pick more than a swatch.
+  const accent = active?.physical_orchestration.hex_color ?? "#6366F1";
+  const accentSoft = rgba(accent, 0.35);
+  const accentDim = rgba(accent, 0.12);
 
   const appendLog = useCallback((entries: { tone: LogTone; text: string }[]) => {
     setLogLines((prev) => {
@@ -208,7 +137,7 @@ export default function CommandDeck(): React.JSX.Element {
   }, []);
 
   /* ---------------------------------------------------------------------- */
-  /* Boot: read the real config and subscribe to extension callbacks         */
+  /* Boot                                                                    */
   /* ---------------------------------------------------------------------- */
 
   useEffect(() => {
@@ -232,11 +161,12 @@ export default function CommandDeck(): React.JSX.Element {
         const [loaded, info] = await Promise.all([api.readConfig(), api.systemInfo()]);
         if (cancelled) return;
         setConfig(loaded);
+        setActiveId((current) => current ?? loaded.profiles[0]?.id ?? null);
         if (isUnconfigured(loaded.user_settings)) setShowCredentials(true);
         appendLog([
           {
             tone: "success",
-            text: `[SHELL] Host online — ${info.platform}/${info.arch}, Electron ${info.electron}. ${loaded.profiles.length} profiles loaded.`,
+            text: `[SHELL] Host online — ${info.platform}/${info.arch}, Electron ${info.electron}. ${loaded.profiles.length} moods loaded.`,
           },
           {
             tone: "network",
@@ -254,9 +184,7 @@ export default function CommandDeck(): React.JSX.Element {
       switch (event.type) {
         case "EXTENSION_READY":
           setExtensionOnline(true);
-          appendLog([
-            { tone: "success", text: `[EXT] Service worker connected on port ${WS_PORT}.` },
-          ]);
+          appendLog([{ tone: "success", text: `[EXT] Service worker connected on port ${WS_PORT}.` }]);
           break;
         case "PURGE_COMPLETE": {
           setExtensionOnline(true);
@@ -270,7 +198,7 @@ export default function CommandDeck(): React.JSX.Element {
               ? [
                   {
                     tone: "warn" as LogTone,
-                    text: `[EXT] Blockade armed across ${blockade.domains?.length ?? 0} distraction domains.`,
+                    text: `[EXT] Blockade armed across ${blockade.domains?.length ?? 0} sites.`,
                   },
                 ]
               : []),
@@ -316,93 +244,106 @@ export default function CommandDeck(): React.JSX.Element {
   /* Execution                                                               */
   /* ---------------------------------------------------------------------- */
 
-  const reportToLog = useCallback(
-    (report: RealityShiftReport): { tone: LogTone; text: string }[] => {
-      const lines: { tone: LogTone; text: string }[] = [];
-      const apps = report.applications;
+  const reportToLog = useCallback((report: RealityShiftReport): { tone: LogTone; text: string }[] => {
+    const lines: { tone: LogTone; text: string }[] = [];
+    const apps = report.applications;
 
+    if (apps.requested > 0) {
       lines.push({
         tone: apps.failed === 0 ? "success" : "warn",
-        text: `[IPC] ${report.profileName} — ${apps.launched}/${apps.requested} applications launched in ${report.durationMs}ms.`,
+        text: `[IPC] ${report.profileName} — ${apps.launched}/${apps.requested} apps launched in ${report.durationMs}ms.`,
       });
-
       for (const result of apps.results) {
         if (result.status === "failed") {
-          lines.push({
-            tone: "error",
-            text: `[IPC] ${basename(result.target)} skipped: ${result.error}`,
-          });
+          lines.push({ tone: "error", text: `[IPC] ${basename(result.target)} skipped: ${result.error}` });
         }
       }
+    }
 
-      const procs = report.processes;
-      if (procs.requested > 0) {
-        lines.push({
-          tone: procs.failed === 0 ? "success" : "warn",
-          text: `[PROC] ${procs.terminated} terminated, ${procs.notRunning} already closed, ${procs.failed} refused across ${procs.requested} targets.`,
-        });
-        for (const result of procs.results) {
-          if (result.status === "rejected" || result.status === "failed") {
-            lines.push({ tone: "warn", text: `[PROC] ${result.target}: ${result.error}` });
+    const procs = report.processes;
+    if (procs.requested > 0) {
+      lines.push({
+        tone: procs.failed === 0 ? "success" : "warn",
+        text: `[PROC] ${procs.terminated} quit, ${procs.notRunning} already closed, ${procs.failed} refused.`,
+      });
+      for (const result of procs.results) {
+        if (result.status === "rejected" || result.status === "failed") {
+          lines.push({ tone: "warn", text: `[PROC] ${result.target}: ${result.error}` });
+        }
+      }
+    }
+
+    lines.push(
+      report.browser.ok
+        ? {
+            tone: "network",
+            text: `[WS:${WS_PORT}] ${report.browser.signal} delivered to ${report.browser.receivers} service worker${
+              report.browser.receivers === 1 ? "" : "s"
+            }.`,
           }
-        }
-      }
+        : {
+            tone: "warn",
+            text: `[WS:${WS_PORT}] ${report.browser.signal} undelivered — ${report.browser.error}.`,
+          },
+    );
 
-      lines.push(
-        report.browser.ok
-          ? {
-              tone: "network",
-              text: `[WS:${WS_PORT}] ${report.browser.signal} delivered to ${report.browser.receivers} service worker${
-                report.browser.receivers === 1 ? "" : "s"
-              }.`,
-            }
-          : {
-              tone: "warn",
-              text: `[WS:${WS_PORT}] ${report.browser.signal} undelivered — ${report.browser.error}.`,
-            },
-      );
+    const physical = report.physical_result;
+    lines.push({
+      tone: physical.status === "failed" ? "error" : "iot",
+      text: `[IoT] Lighting ${physical.status.replace("_", " ")} — ${physical.detail}`,
+    });
 
-      const physical = report.physical_result;
-      lines.push({
-        tone: physical.status === "failed" ? "error" : "iot",
-        text: `[IoT] Lighting ${physical.status.replace("_", " ")} — ${physical.detail}${
-          physical.status === "applied" ? ` (${physical.durationMs}ms)` : ""
-        }`,
-      });
+    const sonic = report.sonic_result;
+    lines.push({
+      tone: sonic.status === "failed" ? "error" : "sonic",
+      text: `[SONIC] Playback ${sonic.status.replace("_", " ")} — ${sonic.detail}`,
+    });
 
-      const sonic = report.sonic_result;
-      lines.push({
-        tone: sonic.status === "failed" ? "error" : "sonic",
-        text: `[SONIC] Playback ${sonic.status.replace("_", " ")} — ${sonic.detail}${
-          sonic.status === "applied" ? ` (${sonic.durationMs}ms)` : ""
-        }`,
-      });
+    const focus = report.focus_result;
+    lines.push({
+      tone: focus.status === "applied" ? "success" : "warn",
+      text: `[OS] Focus filter ${focus.status} — ${focus.detail}`,
+    });
 
-      const focus = report.focus_result;
-      lines.push({
-        tone: focus.status === "applied" ? "success" : "warn",
-        text: `[OS] Focus filter ${focus.status} — ${focus.detail}`,
-      });
+    return lines;
+  }, []);
 
-      return lines;
-    },
-    [config],
-  );
+  const startWave = useCallback(() => {
+    setIsWaving(true);
+    setWaveId((n) => n + 1);
+    window.setTimeout(() => setIsWaving(false), 650);
+  }, []);
+
+  const handleEngage = useCallback(async () => {
+    const api = window.monolith;
+    if (!api || busy || !active) return;
+
+    setBusy(true);
+    startWave();
+    appendLog([{ tone: "network", text: `[IPC] execute-reality-shift → "${active.id}"` }]);
+
+    try {
+      const report = await api.executeRealityShift(active.id);
+      appendLog(reportToLog(report));
+      setEngagedId(active.id);
+    } catch (error) {
+      appendLog([{ tone: "error", text: `[IPC] Shift failed: ${String(error)}` }]);
+    } finally {
+      setBusy(false);
+    }
+  }, [active, appendLog, busy, reportToLog, startWave]);
 
   /** Restores the Neutral State: OS filters off, lights white, tabs rebuilt. */
   const handleDisengage = useCallback(async () => {
     const api = window.monolith;
-    const target = engagedId ?? active.backendId;
+    const target = engagedId ?? active?.id ?? "default";
     if (!api || busy) {
       setEngagedId(null);
       return;
     }
 
     setBusy(true);
-    setIsWaving(true);
-    setWaveId((n) => n + 1);
-    window.setTimeout(() => setIsWaving(false), 650);
-
+    startWave();
     appendLog([{ tone: "network", text: `[IPC] execute-disengage → "${target}"` }]);
 
     try {
@@ -428,79 +369,78 @@ export default function CommandDeck(): React.JSX.Element {
               text: `[WS:${WS_PORT}] HYDRATE_SESSION undelivered — ${report.browser.error}.`,
             },
       ]);
-      setEngagedId(null);
     } catch (error) {
       appendLog([{ tone: "error", text: `[IPC] Disengage failed: ${String(error)}` }]);
+    } finally {
       setEngagedId(null);
-    } finally {
       setBusy(false);
     }
-  }, [active.backendId, appendLog, busy, engagedId]);
-
-  const handleEngage = useCallback(async () => {
-    const api = window.monolith;
-    if (!api || busy) return;
-
-    setBusy(true);
-    setIsWaving(true);
-    setWaveId((n) => n + 1);
-    window.setTimeout(() => setIsWaving(false), 650);
-
-    appendLog([{ tone: "network", text: `[IPC] execute-reality-shift → "${active.backendId}"` }]);
-
-    try {
-      const report = await api.executeRealityShift(active.backendId);
-      appendLog(reportToLog(report));
-      setEngagedId(active.backendId);
-    } catch (error) {
-      appendLog([{ tone: "error", text: `[IPC] Shift failed: ${String(error)}` }]);
-    } finally {
-      setBusy(false);
-    }
-  }, [active.backendId, appendLog, busy, reportToLog]);
+  }, [active, appendLog, busy, engagedId, startWave]);
 
   /** The Nexus is a single toggle: engage on first press, disengage on the next. */
   const handleNexusTrigger = useCallback(() => {
     void (engagedId ? handleDisengage() : handleEngage());
   }, [engagedId, handleDisengage, handleEngage]);
 
-  const handleExitFocus = handleDisengage;
-
-  const handleSelectProfile = (key: ProfileKey) => {
-    if (key === activeKey) return;
-    setActiveKey(key);
-
-    const target = PROFILES[key];
-    const stored = config?.profiles.find((profile) => profile.id === target.backendId);
-    appendLog([
-      {
-        tone: stored ? "success" : "warn",
-        text: stored
-          ? `[DECK] ${target.label} staged — ${stored.digital_purge.launch_applications.length} apps, ${stored.digital_purge.kill_background_processes.length} processes, tabs ${
-              stored.digital_purge.close_browser_tabs ? "purge" : "restore"
-            }.`
-          : `[DECK] ${target.label} staged — no profile "${target.backendId}" found in config.`,
-      },
-    ]);
+  const handleSelect = (profile: BackendProfile) => {
+    if (profile.id === activeId) return;
+    setActiveId(profile.id);
+    appendLog([{ tone: "success", text: `[DECK] ${profile.name} staged — ${summarize(profile)}.` }]);
   };
 
   /* ---------------------------------------------------------------------- */
-  /* Derived display data — everything below comes from the live config      */
+  /* Mood persistence                                                        */
   /* ---------------------------------------------------------------------- */
 
-  // Neutral State — the room simulation glows white until a profile is engaged.
-  const NEUTRAL_HEX = "#FFFFFF";
-  const baseHex = focusMode
-    ? backend?.physical_orchestration.hex_color ?? active.fallbackHex
-    : NEUTRAL_HEX;
-  const lights: LightZone[] = [
+  const persist = useCallback(
+    async (nextProfiles: BackendProfile[], note: string) => {
+      const api = window.monolith;
+      if (!api || !config) return;
+      try {
+        const saved = await api.writeConfig({ ...config, profiles: nextProfiles });
+        setConfig(saved);
+        appendLog([{ tone: "success", text: `[DECK] ${note}` }]);
+      } catch (error) {
+        appendLog([{ tone: "error", text: `[DECK] Could not save moods: ${String(error)}` }]);
+      }
+    },
+    [appendLog, config],
+  );
+
+  const handleSaveProfile = (next: BackendProfile) => {
+    const isNew = editing?.isNew ?? false;
+    const nextProfiles = isNew
+      ? [...profiles, next]
+      : profiles.map((profile) => (profile.id === editing?.profile.id ? next : profile));
+
+    setEditing(null);
+    setActiveId(next.id);
+    void persist(nextProfiles, isNew ? `${next.name} created.` : `${next.name} updated.`);
+  };
+
+  const handleDeleteProfile = () => {
+    const target = editing?.profile;
+    if (!target) return;
+
+    const nextProfiles = profiles.filter((profile) => profile.id !== target.id);
+    setEditing(null);
+    if (activeId === target.id) setActiveId(nextProfiles[0]?.id ?? null);
+    void persist(nextProfiles, `${target.name} deleted.`);
+  };
+
+  /* ---------------------------------------------------------------------- */
+  /* Derived display                                                         */
+  /* ---------------------------------------------------------------------- */
+
+  const baseHex = focusMode ? active?.physical_orchestration.hex_color ?? accent : NEUTRAL_HEX;
+  const lights = [
     { label: "Key Light", hex: shade(baseHex, 0.75) },
     { label: "Monitor Bias", hex: baseHex },
     { label: "Ambient Strip", hex: shade(baseHex, 0.35) },
   ];
-  const binaries = (backend?.digital_purge.launch_applications ?? []).map(basename);
+  const binaries = (active?.digital_purge.launch_applications ?? []).map(basename);
   const bridgeIp = config?.user_settings.hue_bridge_ip || "bridge unset";
-  const sonicProfile = backend?.sonic_layering.target_frequency_profile ?? "—";
+  const sonicProfile = active?.sonic_layering.target_frequency_profile || "—";
 
   return (
     <div className="relative flex h-screen w-full flex-col overflow-hidden bg-black text-slate-100">
@@ -509,56 +449,32 @@ export default function CommandDeck(): React.JSX.Element {
           0%, 100% { box-shadow: 0 0 0 0 var(--nexus-glow), 0 0 40px 8px var(--nexus-glow-soft); }
           50% { box-shadow: 0 0 0 14px transparent, 0 0 70px 18px var(--nexus-glow-soft); }
         }
-        @keyframes canvas-breathe {
-          0%, 100% { opacity: 0.5; }
-          50% { opacity: 0.85; }
-        }
+        @keyframes canvas-breathe { 0%, 100% { opacity: 0.5; } 50% { opacity: 0.85; } }
         @keyframes clip-wave {
           0% { clip-path: circle(0% at 50% 50%); opacity: 0.95; }
           55% { clip-path: circle(70% at 50% 50%); opacity: 0.65; }
           100% { clip-path: circle(150% at 50% 50%); opacity: 0; }
         }
-        @keyframes cursor-blink {
-          0%, 49% { opacity: 1; }
-          50%, 100% { opacity: 0; }
-        }
-        .nexus-pulse {
-          animation: nexus-pulse 2.6s ease-in-out infinite;
-        }
-        .canvas-breathe {
-          animation: canvas-breathe 6s ease-in-out infinite;
-        }
-        .clip-wave {
-          animation: clip-wave 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-          will-change: clip-path, opacity;
-        }
-        .terminal-cursor {
-          animation: cursor-blink 1s step-end infinite;
-        }
-        .command-deck-scroll::-webkit-scrollbar {
-          width: 6px;
-        }
-        .command-deck-scroll::-webkit-scrollbar-thumb {
-          background: #1e1e1e;
-          border-radius: 3px;
-        }
+        @keyframes cursor-blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+        .nexus-pulse { animation: nexus-pulse 2.6s ease-in-out infinite; }
+        .canvas-breathe { animation: canvas-breathe 6s ease-in-out infinite; }
+        .clip-wave { animation: clip-wave 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards; will-change: clip-path, opacity; }
+        .terminal-cursor { animation: cursor-blink 1s step-end infinite; }
+        .command-deck-scroll::-webkit-scrollbar { width: 6px; }
+        .command-deck-scroll::-webkit-scrollbar-thumb { background: #1e1e1e; border-radius: 3px; }
       `}</style>
 
-      {/* Ambient low-frequency background canvas pulse */}
       <div
         className="canvas-breathe pointer-events-none fixed inset-0 z-0 transition-colors duration-700"
-        style={{
-          background: `radial-gradient(circle at 50% 35%, ${active.accentDim}, transparent 65%)`,
-        }}
+        style={{ background: `radial-gradient(circle at 50% 35%, ${accentDim}, transparent 65%)` }}
       />
 
-      {/* Full-screen clip-path wave transition */}
       {isWaving && (
         <div
           key={waveId}
           className="clip-wave pointer-events-none fixed inset-0 z-50"
           style={{
-            background: `radial-gradient(circle at 50% 50%, ${active.accent} 0%, ${active.accentSoft} 45%, transparent 75%)`,
+            background: `radial-gradient(circle at 50% 50%, ${accent} 0%, ${accentSoft} 45%, transparent 75%)`,
           }}
         />
       )}
@@ -569,7 +485,7 @@ export default function CommandDeck(): React.JSX.Element {
           onSaved={(next) => {
             setConfig(next);
             setShowCredentials(false);
-            appendLog([{ tone: "success", text: "[SHELL] Credentials saved to monolith_config.json." }]);
+            appendLog([{ tone: "success", text: "[SHELL] Credentials saved." }]);
           }}
           onDismiss={() => {
             setShowCredentials(false);
@@ -584,8 +500,18 @@ export default function CommandDeck(): React.JSX.Element {
         />
       )}
 
+      {editing && (
+        <ProfileEditor
+          profile={editing.profile}
+          isNew={editing.isNew}
+          onSave={handleSaveProfile}
+          onDelete={editing.isNew ? undefined : handleDeleteProfile}
+          onCancel={() => setEditing(null)}
+        />
+      )}
+
       <TitleBar
-        onExitFocus={focusMode ? handleExitFocus : undefined}
+        onExitFocus={focusMode ? () => void handleDisengage() : undefined}
         shellReady={shellReady}
         extensionOnline={extensionOnline}
         needsCredentials={credentialsDismissed && isUnconfigured(config?.user_settings)}
@@ -594,64 +520,75 @@ export default function CommandDeck(): React.JSX.Element {
 
       <div className="relative z-10 flex flex-1 flex-col overflow-hidden">
         {focusMode ? (
-          /* Lockdown focus view — everything but the Nexus and active profile is stripped away */
           <div className="flex flex-1 flex-col items-center justify-center gap-6 px-4">
             <NexusButton
-              active={active}
-              focusMode={focusMode}
+              accent={accent}
+              accentSoft={accentSoft}
+              label={busy ? "Working" : "Disengage"}
+              disabled={!shellReady || busy}
               busy={busy}
-              disabled={!shellReady}
               onClick={handleNexusTrigger}
               large
             />
-            <p className={`text-sm uppercase tracking-[0.4em] ${active.textGlow}`}>
-              {active.label} &mdash; {active.sublabel}
+            <p className="text-sm uppercase tracking-[0.4em]" style={{ color: accent }}>
+              {active?.name ?? "Engaged"}
             </p>
           </div>
         ) : (
           <div className="grid flex-1 grid-cols-1 gap-4 overflow-hidden p-4 sm:p-6 lg:grid-cols-[1fr_320px] lg:gap-6">
-            {/* Main stage */}
             <div className="flex flex-col gap-6 overflow-y-auto pr-1 lg:pr-2">
               <div className="flex flex-col items-center gap-4 pt-8">
                 <NexusButton
-                  active={active}
-                  focusMode={focusMode}
+                  accent={accent}
+                  accentSoft={accentSoft}
+                  label={busy ? "Working" : "Engage"}
+                  disabled={!shellReady || busy || !active}
                   busy={busy}
-                  disabled={!shellReady}
                   onClick={handleNexusTrigger}
                 />
                 <p className="text-xs uppercase tracking-widest text-slate-500">
-                  {busy ? "Executing…" : focusMode ? `Engaged — ${active.label}` : `Neutral state — ${active.label} staged`}
+                  {busy
+                    ? "Executing…"
+                    : active
+                      ? `Neutral state — ${active.name} staged`
+                      : "No moods yet — create one below"}
                 </p>
               </div>
 
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                {PROFILE_ORDER.map((key) => (
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+                {profiles.map((profile) => (
                   <ProfileCard
-                    key={key}
-                    profile={PROFILES[key]}
-                    isActive={key === activeKey}
-                    onSelect={() => handleSelectProfile(key)}
+                    key={profile.id}
+                    profile={profile}
+                    isActive={profile.id === active?.id}
+                    onSelect={() => handleSelect(profile)}
+                    onEdit={() => setEditing({ profile, isNew: false })}
                   />
                 ))}
+                <button
+                  onClick={() => setEditing({ profile: emptyProfile(), isNew: true })}
+                  className="flex min-h-[84px] flex-col items-center justify-center gap-1 rounded-xl border border-dashed border-[#242430] p-3 text-slate-600 transition hover:border-slate-500 hover:text-slate-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-400"
+                >
+                  <span className="text-xl leading-none">+</span>
+                  <span className="text-[11px] uppercase tracking-widest">New mood</span>
+                </button>
               </div>
 
               <RoomSimulator
-                active={active}
+                accentSoft={accentSoft}
                 lights={lights}
                 binaries={binaries}
                 bridgeIp={bridgeIp}
                 sonicProfile={sonicProfile}
-                brightness={backend?.physical_orchestration.brightness ?? 0}
+                brightness={active?.physical_orchestration.brightness ?? 0}
+                engaged={focusMode}
               />
             </div>
 
-            {/* Context Crisis Statistics Terminal */}
             <StatsTerminal />
           </div>
         )}
 
-        {/* Real-time IPC log terminal */}
         {!focusMode && (
           <div className="z-10 border-t border-slate-800 bg-[#0a0a0a] px-4 py-3 sm:px-6">
             <div className="mb-2 flex items-center justify-between">
@@ -789,36 +726,36 @@ function WindowButton({
 }
 
 function NexusButton({
-  active,
-  focusMode,
-  busy,
+  accent,
+  accentSoft,
+  label,
   disabled,
+  busy,
   onClick,
   large,
 }: {
-  active: Profile;
-  focusMode: boolean;
-  busy: boolean;
+  accent: string;
+  accentSoft: string;
+  label: string;
   disabled: boolean;
+  busy: boolean;
   onClick: () => void;
   large?: boolean;
 }): React.JSX.Element {
-  const label = busy ? "Working" : focusMode ? "Disengage" : "Engage";
-
   return (
     <button
       onClick={onClick}
-      disabled={disabled || busy}
+      disabled={disabled}
       aria-busy={busy}
       className={`nexus-pulse group relative flex items-center justify-center rounded-full border-2 bg-gradient-to-b from-[#1e1e1e] to-black transition-transform duration-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 ${
         large ? "h-56 w-56 sm:h-72 sm:w-72" : "h-40 w-40 sm:h-52 sm:w-52"
       }`}
       style={
         {
-          borderColor: active.accent,
-          outlineColor: active.accent,
-          "--nexus-glow": active.accent,
-          "--nexus-glow-soft": active.accentSoft,
+          borderColor: accent,
+          outlineColor: accent,
+          "--nexus-glow": accent,
+          "--nexus-glow-soft": accentSoft,
         } as React.CSSProperties
       }
     >
@@ -826,7 +763,7 @@ function NexusButton({
         className={`text-center font-bold uppercase tracking-[0.35em] transition-colors duration-500 ${
           large ? "text-lg sm:text-xl" : "text-sm sm:text-base"
         }`}
-        style={{ color: active.accent }}
+        style={{ color: accent }}
       >
         {label}
       </span>
@@ -838,58 +775,81 @@ function ProfileCard({
   profile,
   isActive,
   onSelect,
+  onEdit,
 }: {
-  profile: Profile;
+  profile: BackendProfile;
   isActive: boolean;
   onSelect: () => void;
+  onEdit: () => void;
 }): React.JSX.Element {
+  const hex = profile.physical_orchestration.hex_color;
+
   return (
-    <button
-      onClick={onSelect}
-      aria-pressed={isActive}
-      className={`flex flex-col items-start gap-1 rounded-xl border bg-[#121212] p-3 text-left transition-all duration-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-400 sm:p-4 ${
-        isActive
-          ? `${profile.ring} shadow-[0_0_25px_var(--tw-shadow-color)]`
-          : "border-[#1e1e1e] hover:border-slate-600"
+    <div
+      className={`group relative flex min-h-[84px] flex-col justify-between gap-1 rounded-xl border bg-[#121212] p-3 transition-all duration-300 sm:p-4 ${
+        isActive ? "" : "border-[#1e1e1e] hover:border-slate-600"
       }`}
-      style={
-        isActive
-          ? ({ "--tw-shadow-color": profile.accentSoft } as React.CSSProperties)
-          : undefined
-      }
+      style={isActive ? { borderColor: hex, boxShadow: `0 0 25px ${rgba(hex, 0.35)}` } : undefined}
     >
-      <span
-        className={`text-sm font-semibold sm:text-base ${
-          isActive ? profile.textGlow : "text-slate-200"
-        }`}
+      <button
+        onClick={onSelect}
+        aria-pressed={isActive}
+        className="flex flex-col items-start gap-1 pr-8 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-400"
       >
-        {profile.label}
-      </span>
-      <span className="text-[11px] text-slate-500 sm:text-xs">{profile.sublabel}</span>
-    </button>
+        <span className="flex items-center gap-2">
+          <span
+            className="h-2.5 w-2.5 shrink-0 rounded-full"
+            style={{ backgroundColor: hex, boxShadow: `0 0 8px ${rgba(hex, 0.7)}` }}
+          />
+          <span
+            className="text-sm font-semibold sm:text-base"
+            style={{ color: isActive ? hex : undefined }}
+          >
+            {profile.name}
+          </span>
+        </span>
+        <span className="text-[11px] leading-snug text-slate-500">{summarize(profile)}</span>
+      </button>
+
+      <button
+        onClick={onEdit}
+        aria-label={`Edit ${profile.name}`}
+        title={`Edit ${profile.name}`}
+        className="absolute right-2 top-2 rounded px-1.5 py-0.5 text-[10px] uppercase tracking-widest text-slate-700 opacity-0 transition hover:text-slate-300 focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-400 group-hover:opacity-100"
+      >
+        Edit
+      </button>
+    </div>
   );
 }
 
 function RoomSimulator({
-  active,
+  accentSoft,
   lights,
   binaries,
   bridgeIp,
   sonicProfile,
   brightness,
+  engaged,
 }: {
-  active: Profile;
-  lights: LightZone[];
+  accentSoft: string;
+  lights: { label: string; hex: string }[];
   binaries: string[];
   bridgeIp: string;
   sonicProfile: string;
   brightness: number;
+  engaged: boolean;
 }): React.JSX.Element {
   return (
     <section className="rounded-2xl border border-[#1e1e1e] bg-[#121212]/60 p-4 sm:p-6">
-      <h2 className="mb-4 text-xs uppercase tracking-[0.3em] text-slate-500">
-        Virtual Space Environment Simulator
-      </h2>
+      <div className="mb-4 flex items-baseline justify-between gap-3">
+        <h2 className="text-xs uppercase tracking-[0.3em] text-slate-500">
+          Virtual Space Environment Simulator
+        </h2>
+        <span className="text-[10px] uppercase tracking-widest text-slate-600">
+          {engaged ? "Engaged" : "Neutral"}
+        </span>
+      </div>
       <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
         <svg
           viewBox="0 0 320 200"
@@ -899,17 +859,15 @@ function RoomSimulator({
         >
           <defs>
             <radialGradient id="ambientGlow" cx="50%" cy="20%" r="80%">
-              <stop offset="0%" stopColor={active.accentSoft} />
+              <stop offset="0%" stopColor={accentSoft} />
               <stop offset="100%" stopColor="transparent" />
             </radialGradient>
           </defs>
           <rect width="320" height="200" fill="#050505" />
           <rect width="320" height="200" fill="url(#ambientGlow)" style={{ transition: "fill 500ms ease" }} />
-          {/* desk */}
           <rect x="40" y="140" width="240" height="10" rx="2" fill="#1e293b" />
           <rect x="50" y="150" width="8" height="30" fill="#111827" />
           <rect x="262" y="150" width="8" height="30" fill="#111827" />
-          {/* monitor */}
           <rect x="120" y="80" width="80" height="50" rx="3" fill="#0f172a" />
           <rect
             x="126"
@@ -921,7 +879,6 @@ function RoomSimulator({
             style={{ transition: "fill 500ms ease", opacity: 0.85 }}
           />
           <rect x="152" y="130" width="16" height="10" fill="#1e293b" />
-          {/* ambient wall lighting grid */}
           <rect
             x="20"
             y="20"
@@ -943,14 +900,7 @@ function RoomSimulator({
               style={{ transition: "fill 500ms ease", opacity: 0.5 }}
             />
           ))}
-          {/* key light lamp */}
-          <circle
-            cx="255"
-            cy="70"
-            r="10"
-            fill={lights[0].hex}
-            style={{ transition: "fill 500ms ease" }}
-          />
+          <circle cx="255" cy="70" r="10" fill={lights[0].hex} style={{ transition: "fill 500ms ease" }} />
           <line x1="255" y1="80" x2="255" y2="140" stroke="#1e293b" strokeWidth="3" />
         </svg>
 
@@ -981,9 +931,7 @@ function RoomSimulator({
                 </span>
               ))
             ) : (
-              <span className="text-[11px] text-slate-600">
-                No applications configured for this profile.
-              </span>
+              <span className="text-[11px] text-slate-600">No apps set for this mood.</span>
             )}
           </div>
         </div>
@@ -1006,9 +954,7 @@ function StatsTerminal(): React.JSX.Element {
       <div className="command-deck-scroll flex-1 overflow-y-auto px-4 py-4 font-mono text-[11px] leading-relaxed">
         {CRISIS_STATS.map((stat) => (
           <div key={stat.id} className="mb-4 border-l-2 border-red-500/40 pl-3">
-            <p className="font-semibold uppercase tracking-wide text-red-400">
-              {stat.headline}:
-            </p>
+            <p className="font-semibold uppercase tracking-wide text-red-400">{stat.headline}:</p>
             <p className="mt-1 text-slate-300">{stat.body}</p>
             <p className="mt-1 text-slate-600">(Source: {stat.source})</p>
           </div>

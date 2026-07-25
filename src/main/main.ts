@@ -10,7 +10,7 @@
  *   4. The configuration store for monolith_config.json.
  */
 
-import { app, BrowserWindow, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import { exec } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -287,10 +287,13 @@ function normalizeProfile(input: unknown, index: number): Profile {
   return {
     id: String(source.id ?? `profile_${index}`),
     name: String(source.name ?? `Profile ${index + 1}`),
+    builtin: Boolean(source.builtin ?? false),
     digital_purge: {
       close_browser_tabs: Boolean(purge.close_browser_tabs ?? false),
       launch_applications: toStringArray(purge.launch_applications),
       kill_background_processes: toStringArray(purge.kill_background_processes),
+      block_distractions: Boolean(purge.block_distractions ?? false),
+      blocked_domains: toStringArray(purge.blocked_domains),
     },
     physical_orchestration: {
       lights_enabled: Boolean(physical.lights_enabled ?? false),
@@ -758,6 +761,10 @@ async function executeRealityShift(payload: unknown): Promise<RealityShiftReport
   const receivers = bridge.broadcast(signal, {
     profileId: profile.id,
     profileName: profile.name,
+    // Per-mood blocking: the worker arms its blockade from these, not from a
+    // hardcoded profile id.
+    block_distractions: profile.digital_purge.block_distractions,
+    blocked_domains: profile.digital_purge.blocked_domains,
   });
   const browser: BrowserDispatchResult = {
     signal,
@@ -1051,6 +1058,30 @@ function registerIpcHandlers(): void {
     } catch (error) {
       log('error', 'config', 'failed to persist config', describeError(error));
       return normalizeConfig(config);
+    }
+  });
+
+  // Typing an .app path by hand is miserable; the editor opens a real picker.
+  ipcMain.handle('dialog:pick-applications', async (event): Promise<string[]> => {
+    const owner = BrowserWindow.fromWebContents(event.sender);
+    const options: Electron.OpenDialogOptions = {
+      title: 'Choose applications to launch',
+      defaultPath: process.platform === 'darwin' ? '/Applications' : undefined,
+      properties: ['openFile', 'multiSelections'],
+      filters:
+        process.platform === 'win32'
+          ? [{ name: 'Applications', extensions: ['exe', 'lnk', 'bat', 'cmd'] }]
+          : undefined,
+    };
+
+    try {
+      const result = owner
+        ? await dialog.showOpenDialog(owner, options)
+        : await dialog.showOpenDialog(options);
+      return result.canceled ? [] : result.filePaths;
+    } catch (error) {
+      log('warn', 'shell', 'application picker failed', describeError(error));
+      return [];
     }
   });
 

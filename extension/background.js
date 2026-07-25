@@ -374,12 +374,20 @@ async function aggressivePurge(payload) {
   const profileId = payload.profileId || 'default';
   const tabs = await queryPurgeableTabs();
 
+  // Any mood can arm the blockade — the host says so per shift. The legacy
+  // deep_work check stays as a fallback for hosts that send neither field.
+  const wantsBlockade =
+    typeof payload.block_distractions === 'boolean'
+      ? payload.block_distractions
+      : Array.isArray(payload.blocked_domains) && payload.blocked_domains.length > 0
+        ? true
+        : profileId === BLOCKADE_PROFILE_ID;
+
   // The blockade is a property of the profile, not of the tab count — arm it
   // even when there was nothing to close.
-  const blockade =
-    profileId === BLOCKADE_PROFILE_ID
-      ? await activateBlockade(payload)
-      : { armed: false, cleared: await deactivateBlockade() };
+  const blockade = wantsBlockade
+    ? await activateBlockade(payload)
+    : { armed: false, cleared: await deactivateBlockade() };
 
   if (tabs.length === 0) {
     log('purge requested but no unpinned tabs are open');
