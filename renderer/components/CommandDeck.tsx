@@ -4,6 +4,7 @@ import type {
   MonolithConfig,
   Profile,
   RealityShiftReport,
+  Schedule,
   SessionStats,
 } from "../monolith";
 import CredentialsModal, { isUnconfigured } from "./CredentialsModal";
@@ -105,6 +106,8 @@ function summarize(profile: Profile): string {
 }
 
 const DAY_ABBR = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
+const DAY_LETTERS = ["S", "M", "T", "W", "T", "F", "S"];
+const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 /** "9am–5pm" instead of "09:00–17:00" — read as a schedule, not a config value. */
 function formatHour(hhmm: string): string {
@@ -493,6 +496,31 @@ export default function CommandDeck(): React.JSX.Element {
     [appendLog, config],
   );
 
+  /**
+   * Edits the staged mood's schedule in place from the dashboard, not from
+   * inside the mood editor — a schedule is something you glance at and nudge
+   * often, not a one-time setup field. Quiet on its own (no log line) unless
+   * a note is passed, since a time-input tweak shouldn't spam the activity
+   * log the way creating or deleting a mood does.
+   */
+  const updateActiveSchedule = useCallback(
+    async (patch: Partial<Profile["schedule"]>, note?: string) => {
+      const api = window.monolith;
+      if (!api || !config || !active) return;
+      const nextProfiles = profiles.map((profile) =>
+        profile.id === active.id ? { ...profile, schedule: { ...profile.schedule, ...patch } } : profile,
+      );
+      try {
+        const saved = await api.writeConfig({ ...config, profiles: nextProfiles });
+        setConfig(saved);
+        if (note) appendLog([{ tone: "success", text: note }]);
+      } catch (error) {
+        appendLog([{ tone: "error", text: `Couldn't save the schedule: ${String(error)}` }]);
+      }
+    },
+    [active, appendLog, config, profiles],
+  );
+
   const handleSaveProfile = (next: Profile) => {
     const isNew = editing?.isNew ?? false;
     const nextProfiles = isNew
@@ -671,6 +699,16 @@ export default function CommandDeck(): React.JSX.Element {
                 <span className="text-[11px] uppercase tracking-widest">New mood</span>
               </button>
             </div>
+
+            {active && (
+              <div className="mx-auto w-full max-w-6xl">
+                <ScheduleCard
+                  profileName={active.name}
+                  schedule={active.schedule}
+                  onChange={updateActiveSchedule}
+                />
+              </div>
+            )}
 
             <div className="mx-auto grid w-full max-w-6xl gap-4 pb-2 lg:grid-cols-5">
               <div className="lg:col-span-3">
@@ -958,6 +996,99 @@ function StatsTerminal({ stats }: { stats: SessionStats | null }): React.JSX.Ele
         ))}
       </div>
     </aside>
+  );
+}
+
+/**
+ * Lives on the dashboard, not inside the mood editor — a schedule is
+ * something to glance at and nudge often, and it always acts on whichever
+ * mood is currently staged in the grid above.
+ */
+function ScheduleCard({
+  profileName,
+  schedule,
+  onChange,
+}: {
+  profileName: string;
+  schedule: Schedule;
+  onChange: (patch: Partial<Schedule>, note?: string) => void;
+}): React.JSX.Element {
+  const toggleDay = (day: number) =>
+    onChange({
+      days: schedule.days.includes(day) ? schedule.days.filter((d) => d !== day) : [...schedule.days, day].sort(),
+    });
+
+  return (
+    <section className="rounded-2xl border border-[#1e1e1e] bg-[#121218]/60 p-4 sm:p-6">
+      <div className="mb-4 flex items-baseline justify-between gap-3">
+        <h2 className="text-sm font-medium text-slate-300">Schedule</h2>
+        <span className="text-xs text-slate-600">{profileName}</span>
+      </div>
+
+      <label className="flex cursor-pointer items-center gap-2.5 text-sm text-slate-300">
+        <input
+          type="checkbox"
+          checked={schedule.enabled}
+          onChange={(event) =>
+            onChange(
+              { enabled: event.target.checked },
+              `${profileName} ${event.target.checked ? "will run on a schedule." : "schedule turned off."}`,
+            )
+          }
+          className="h-4 w-4 cursor-pointer accent-indigo-500"
+        />
+        Engage and disengage on a timer
+      </label>
+
+      {schedule.enabled && (
+        <div className="mt-4 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-wrap items-center gap-4">
+            <label className="flex items-center gap-2 text-xs text-slate-500">
+              Engage
+              <input
+                type="time"
+                value={schedule.engage_time}
+                onChange={(event) => onChange({ engage_time: event.target.value })}
+                className="rounded-lg border border-[#242430] bg-black/60 px-2 py-1.5 text-sm text-slate-200 outline-none transition focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400/40"
+              />
+            </label>
+            <label className="flex items-center gap-2 text-xs text-slate-500">
+              Disengage
+              <input
+                type="time"
+                value={schedule.disengage_time}
+                onChange={(event) => onChange({ disengage_time: event.target.value })}
+                className="rounded-lg border border-[#242430] bg-black/60 px-2 py-1.5 text-sm text-slate-200 outline-none transition focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400/40"
+              />
+            </label>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <span className="text-xs text-slate-500">
+              {schedule.days.length === 0 ? "Every day" : "Repeats on"}
+            </span>
+            <div className="flex gap-1.5">
+              {DAY_LETTERS.map((label, day) => (
+                <button
+                  key={day}
+                  type="button"
+                  onClick={() => toggleDay(day)}
+                  aria-pressed={schedule.days.includes(day)}
+                  title={DAY_NAMES[day]}
+                  className={`flex h-7 w-7 items-center justify-center rounded-full border text-xs font-semibold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-300 ${
+                    schedule.days.includes(day)
+                      ? "border-indigo-400 bg-indigo-500/20 text-indigo-200"
+                      : "border-[#242430] text-slate-500 hover:border-slate-500 hover:text-slate-300"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </section>
   );
 }
 
