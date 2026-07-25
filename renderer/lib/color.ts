@@ -41,6 +41,17 @@ export function rgba(hex: string, alpha: number): string {
   return `rgba(${r},${g},${b},${alpha})`;
 }
 
+/** Blends toward another colour; factor 0 is unchanged, 1 is fully `toward`. */
+export function mix(hex: string, toward: string, factor: number): string {
+  const a = parseHex(hex);
+  const b = parseHex(toward);
+  return toHex({
+    r: a.r + (b.r - a.r) * factor,
+    g: a.g + (b.g - a.g) * factor,
+    b: a.b + (b.b - a.b) * factor,
+  });
+}
+
 /** Mixes toward black; factor 1 is unchanged, 0 is black. */
 export function shade(hex: string, factor: number): string {
   const { r, g, b } = parseHex(hex);
