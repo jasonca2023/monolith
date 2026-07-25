@@ -35,8 +35,23 @@ export function emptyProfile(): BackendProfile {
       playlist_uri: "",
       target_frequency_profile: "",
     },
+    schedule: {
+      enabled: false,
+      engage_time: "09:00",
+      disengage_time: "17:00",
+      days: [],
+    },
   };
 }
+
+const DAY_LABELS = ["S", "M", "T", "W", "T", "F", "S"];
+
+const DEFAULT_SCHEDULE: BackendProfile["schedule"] = {
+  enabled: false,
+  engage_time: "09:00",
+  disengage_time: "17:00",
+  days: [],
+};
 
 const toLines = (values: string[]) => values.join("\n");
 const fromLines = (text: string) =>
@@ -107,6 +122,7 @@ export default function ProfileEditor({
   const purge = draft.digital_purge;
   const physical = draft.physical_orchestration;
   const sonic = draft.sonic_layering;
+  const schedule = draft.schedule ?? DEFAULT_SCHEDULE;
 
   const patchPurge = (patch: Partial<BackendProfile["digital_purge"]>) =>
     setDraft((prev) => ({ ...prev, digital_purge: { ...prev.digital_purge, ...patch } }));
@@ -117,6 +133,17 @@ export default function ProfileEditor({
     }));
   const patchSonic = (patch: Partial<BackendProfile["sonic_layering"]>) =>
     setDraft((prev) => ({ ...prev, sonic_layering: { ...prev.sonic_layering, ...patch } }));
+  const patchSchedule = (patch: Partial<BackendProfile["schedule"]>) =>
+    setDraft((prev) => ({
+      ...prev,
+      schedule: { ...(prev.schedule ?? DEFAULT_SCHEDULE), ...patch },
+    }));
+  const toggleDay = (day: number) =>
+    patchSchedule({
+      days: schedule.days.includes(day)
+        ? schedule.days.filter((d) => d !== day)
+        : [...schedule.days, day].sort(),
+    });
 
   const pickApps = async () => {
     const api = window.monolith;
@@ -140,6 +167,7 @@ export default function ProfileEditor({
         // The user picks a colour; the bridge needs chromaticity coordinates.
         hue_xy_payload: hexToXy(draft.physical_orchestration.hex_color),
       },
+      schedule: draft.schedule ?? DEFAULT_SCHEDULE,
     });
   };
 
@@ -298,6 +326,63 @@ export default function ProfileEditor({
                   onChange={(event) => patchSonic({ target_frequency_profile: event.target.value })}
                   className={inputClass}
                 />
+              </>
+            )}
+          </Section>
+
+          <Section title="Schedule" caption="Runs automatically even when Monolith is in the background.">
+            <Toggle
+              checked={schedule.enabled}
+              onChange={(next) => patchSchedule({ enabled: next })}
+              label="Engage and disengage on a timer"
+            />
+            {schedule.enabled && (
+              <>
+                <div className="flex flex-wrap items-center gap-4">
+                  <label className="flex items-center gap-2 text-[11px] uppercase tracking-widest text-slate-500">
+                    Engage
+                    <input
+                      type="time"
+                      value={schedule.engage_time}
+                      onChange={(event) => patchSchedule({ engage_time: event.target.value })}
+                      className={`${inputClass} w-auto`}
+                    />
+                  </label>
+                  <label className="flex items-center gap-2 text-[11px] uppercase tracking-widest text-slate-500">
+                    Disengage
+                    <input
+                      type="time"
+                      value={schedule.disengage_time}
+                      onChange={(event) => patchSchedule({ disengage_time: event.target.value })}
+                      className={`${inputClass} w-auto`}
+                    />
+                  </label>
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-[11px] uppercase tracking-widest text-slate-500">
+                    Repeats on {schedule.days.length === 0 && "· every day"}
+                  </span>
+                  <div className="flex gap-1.5">
+                    {DAY_LABELS.map((label, day) => (
+                      <button
+                        key={day}
+                        type="button"
+                        onClick={() => toggleDay(day)}
+                        aria-pressed={schedule.days.includes(day)}
+                        title={
+                          ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][day]
+                        }
+                        className={`flex h-8 w-8 items-center justify-center rounded-full border text-xs font-semibold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-300 ${
+                          schedule.days.includes(day)
+                            ? "border-indigo-400 bg-indigo-500/20 text-indigo-200"
+                            : "border-[#242430] text-slate-500 hover:border-slate-500 hover:text-slate-300"
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </>
             )}
           </Section>

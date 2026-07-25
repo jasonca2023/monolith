@@ -23,6 +23,7 @@ import type {
   MonolithConfig,
   PhysicalOrchestration,
   Profile,
+  Schedule,
   SonicLayering,
   UserSettings,
 } from './config-types';
@@ -306,6 +307,27 @@ function normalizeProfile(input: unknown, index: number): Profile {
       playlist_uri: String(sonic.playlist_uri ?? ''),
       target_frequency_profile: String(sonic.target_frequency_profile ?? ''),
     },
+    schedule: normalizeSchedule(source.schedule),
+  };
+}
+
+const TIME_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)$/;
+
+function normalizeTime(value: unknown, fallback: string): string {
+  return typeof value === 'string' && TIME_PATTERN.test(value) ? value : fallback;
+}
+
+function normalizeSchedule(input: unknown): Schedule {
+  const source = (isRecord(input) ? input : {}) as Partial<Schedule>;
+  const days = Array.isArray(source.days)
+    ? [...new Set(source.days.map(Number).filter((day) => Number.isInteger(day) && day >= 0 && day <= 6))]
+    : [];
+
+  return {
+    enabled: Boolean(source.enabled ?? false),
+    engage_time: normalizeTime(source.engage_time, '09:00'),
+    disengage_time: normalizeTime(source.disengage_time, '17:00'),
+    days,
   };
 }
 
@@ -643,11 +665,16 @@ class OrchestrationBridge {
 
     const envelope = parsed as Partial<BridgeEnvelope>;
     log('info', 'bridge', `extension reported "${envelope.type ?? 'UNKNOWN'}"`, envelope.payload);
+    broadcastBridgeEvent(envelope.type ?? 'UNKNOWN', envelope.payload);
+  }
+}
 
-    for (const window of BrowserWindow.getAllWindows()) {
-      if (!window.isDestroyed()) {
-        window.webContents.send('bridge:event', parsed);
-      }
+/** Pushes an event to every open renderer window over the `bridge:event` channel. */
+function broadcastBridgeEvent(type: string, payload?: Record<string, unknown>): void {
+  const envelope = { type, payload, issuedAt: new Date().toISOString() };
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) {
+      window.webContents.send('bridge:event', envelope);
     }
   }
 }
@@ -895,6 +922,83 @@ function emptyReport(startedAt: Date, error: string): RealityShiftReport {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Scheduler                                                                   */
+/* -------------------------------------------------------------------------- */
+
+const SCHEDULE_POLL_MS = 20_000;
+
+/**
+ * Polls every profile's schedule against wall-clock time and fires the same
+ * engage/disengage path the Nexus button uses. Lives in the main process so
+ * it keeps running even if no renderer window is open.
+ */
+class Scheduler {
+  private timer: NodeJS.Timeout | null = null;
+  private lastFiredKey: string | null = null;
+  private engagedProfileId: string | null = null;
+
+  start(): void {
+    if (this.timer) return;
+    this.timer = setInterval(() => void this.tick(), SCHEDULE_POLL_MS);
+    void this.tick();
+  }
+
+  stop(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+  }
+
+  private async tick(): Promise<void> {
+    let config: MonolithConfig;
+    try {
+      config = await configStore.read();
+    } catch (error) {
+      log('error', 'schedule', 'could not read config for schedule check', describeError(error));
+      return;
+    }
+
+    const now = new Date();
+    const hhmm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    const day = now.getDay();
+
+    for (const profile of config.profiles) {
+      const schedule = profile.schedule;
+      if (!schedule?.enabled) continue;
+      if (schedule.days.length > 0 && !schedule.days.includes(day)) continue;
+
+      if (schedule.engage_time === hhmm) {
+        // One poll tick per minute of match, even though we check every 20s.
+        await this.fire('engage', profile, hhmm);
+      } else if (schedule.disengage_time === hhmm) {
+        await this.fire('disengage', profile, hhmm);
+      }
+    }
+  }
+
+  private async fire(action: 'engage' | 'disengage', profile: Profile, hhmm: string): Promise<void> {
+    const key = `${action}:${profile.id}:${hhmm}`;
+    if (key === this.lastFiredKey) return;
+    this.lastFiredKey = key;
+
+    if (action === 'engage') {
+      if (this.engagedProfileId === profile.id) return;
+      log('info', 'schedule', `engaging "${profile.name}" at ${hhmm}`);
+      const report = await executeRealityShift(profile.id);
+      this.engagedProfileId = profile.id;
+      broadcastBridgeEvent('SCHEDULE_ENGAGED', { profileId: profile.id, report: report as unknown as Record<string, unknown> });
+    } else {
+      if (this.engagedProfileId !== profile.id) return;
+      log('info', 'schedule', `disengaging "${profile.name}" at ${hhmm}`);
+      const report = await executeDisengage(profile.id);
+      this.engagedProfileId = null;
+      broadcastBridgeEvent('SCHEDULE_DISENGAGED', { profileId: profile.id, report: report as unknown as Record<string, unknown> });
+    }
+  }
+}
+
+const scheduler = new Scheduler();
+
+/* -------------------------------------------------------------------------- */
 /* Application shell                                                           */
 /* -------------------------------------------------------------------------- */
 
@@ -1138,6 +1242,7 @@ if (!app.requestSingleInstanceLock()) {
     });
 
     mainWindow = createMainWindow();
+    scheduler.start();
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) mainWindow = createMainWindow();
@@ -1148,7 +1253,10 @@ if (!app.requestSingleInstanceLock()) {
     if (process.platform !== 'darwin') app.quit();
   });
 
-  app.on('before-quit', () => bridge.stop());
+  app.on('before-quit', () => {
+    bridge.stop();
+    scheduler.stop();
+  });
 }
 
 process.on('uncaughtException', (error) => {

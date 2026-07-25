@@ -34,6 +34,16 @@ export interface SonicLayering {
   target_frequency_profile: string;
 }
 
+export interface Schedule {
+  enabled: boolean;
+  /** 24h local time, "HH:MM". */
+  engage_time: string;
+  /** 24h local time, "HH:MM". */
+  disengage_time: string;
+  /** 0 (Sunday) – 6 (Saturday). Empty means every day. */
+  days: number[];
+}
+
 export interface Profile {
   id: string;
   name: string;
@@ -42,6 +52,7 @@ export interface Profile {
   digital_purge: DigitalPurge;
   physical_orchestration: PhysicalOrchestration;
   sonic_layering: SonicLayering;
+  schedule: Schedule;
 }
 
 export interface MonolithConfig {
