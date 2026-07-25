@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 type ProfileKey = "deepWork" | "brainDump" | "highEnergy" | "lateNight";
 
@@ -14,6 +14,9 @@ interface Profile {
   accent: string;
   accentSoft: string;
   accentDim: string;
+  accentMuted: string;
+  accentMutedSoft: string;
+  accentMutedDim: string;
   ring: string;
   textGlow: string;
   lights: LightZone[];
@@ -36,6 +39,9 @@ const PROFILES: Record<ProfileKey, Profile> = {
     accent: "#6366f1",
     accentSoft: "rgba(99,102,241,0.35)",
     accentDim: "rgba(99,102,241,0.12)",
+    accentMuted: "#4b4b6e",
+    accentMutedSoft: "rgba(99,102,241,0.15)",
+    accentMutedDim: "rgba(99,102,241,0.05)",
     ring: "border-indigo-400",
     textGlow: "text-indigo-300",
     lights: [
@@ -58,6 +64,9 @@ const PROFILES: Record<ProfileKey, Profile> = {
     accent: "#f59e0b",
     accentSoft: "rgba(245,158,11,0.35)",
     accentDim: "rgba(245,158,11,0.12)",
+    accentMuted: "#8a6f3f",
+    accentMutedSoft: "rgba(245,158,11,0.15)",
+    accentMutedDim: "rgba(245,158,11,0.05)",
     ring: "border-amber-400",
     textGlow: "text-amber-300",
     lights: [
@@ -80,6 +89,9 @@ const PROFILES: Record<ProfileKey, Profile> = {
     accent: "#dc2626",
     accentSoft: "rgba(220,38,38,0.35)",
     accentDim: "rgba(220,38,38,0.12)",
+    accentMuted: "#7a3a3a",
+    accentMutedSoft: "rgba(220,38,38,0.15)",
+    accentMutedDim: "rgba(220,38,38,0.05)",
     ring: "border-red-500",
     textGlow: "text-red-400",
     lights: [
@@ -102,6 +114,9 @@ const PROFILES: Record<ProfileKey, Profile> = {
     accent: "#a855f7",
     accentSoft: "rgba(168,85,247,0.35)",
     accentDim: "rgba(168,85,247,0.12)",
+    accentMuted: "#6b5480",
+    accentMutedSoft: "rgba(168,85,247,0.15)",
+    accentMutedDim: "rgba(168,85,247,0.05)",
     ring: "border-purple-400",
     textGlow: "text-purple-300",
     lights: [
@@ -124,46 +139,6 @@ const PROFILE_ORDER: ProfileKey[] = [
   "brainDump",
   "highEnergy",
   "lateNight",
-];
-
-interface CrisisStat {
-  id: string;
-  headline: string;
-  body: string;
-  source: string;
-}
-
-const CRISIS_STATS: CrisisStat[] = [
-  {
-    id: "cognitive-drain",
-    headline: "COGNITIVE DRAIN EFFICIENCY DETECTED",
-    body: "Up to 40% of productive time is lost daily to task shifting and setup friction rituals.",
-    source: "American Psychological Association",
-  },
-  {
-    id: "system-overload",
-    headline: "SYSTEM OVERLOAD WARNING",
-    body: "Knowledge workers lose an average of 2 hours per day to workspace distractions, draining $650 Billion annually from the US Economy.",
-    source: "Speakwise Index",
-  },
-  {
-    id: "recovery-threshold",
-    headline: "DISRUPTION RECOVERY THRESHOLD",
-    body: "It takes an average of 23 minutes and 15 seconds to fully refocus after a single digital workplace disruption.",
-    source: "Dr. Gloria Mark, UC Irvine",
-  },
-  {
-    id: "clutter-factor",
-    headline: "DIGITAL CLUTTER FACTOR",
-    body: "Modern workers toggle between browser tabs and applications up to 1,200 times per day, wasting 3.6 hours per week in context switching.",
-    source: "Asana & Harvard Business Review data",
-  },
-  {
-    id: "fragmentation-coefficient",
-    headline: "FRAGMENTATION COEFFICIENT",
-    body: "The average uninterrupted focus session on an un-orchestrated desktop workspace lasts an abysmal 13 minutes and 7 seconds.",
-    source: "ActivTrak State of the Workplace study",
-  },
 ];
 
 type LogTone = "success" | "network" | "iot" | "sonic";
@@ -213,9 +188,14 @@ export default function CommandDeck(): React.JSX.Element {
   const [focusMode, setFocusMode] = useState(false);
   const [waveId, setWaveId] = useState(0);
   const [isWaving, setIsWaving] = useState(false);
+  const [waveDirection, setWaveDirection] = useState<"expand" | "collapse">("expand");
+  const [waveOrigin, setWaveOrigin] = useState({ x: 0, y: 0 });
   const [logLines, setLogLines] = useState<LogLine[]>([]);
   const logCounter = useRef(0);
   const logEndRef = useRef<HTMLDivElement | null>(null);
+  const dashboardNexusRef = useRef<HTMLButtonElement | null>(null);
+  const dashboardNexusOrigin = useRef({ x: 0, y: 0 });
+  const waveTimeoutRef = useRef<number | undefined>(undefined);
 
   const active = useMemo(() => PROFILES[activeKey], [activeKey]);
 
@@ -240,17 +220,44 @@ export default function CommandDeck(): React.JSX.Element {
     logEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [logLines]);
 
+  useLayoutEffect(() => {
+    if (focusMode || !dashboardNexusRef.current) return;
+    const rect = dashboardNexusRef.current.getBoundingClientRect();
+    dashboardNexusOrigin.current = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+  }, [focusMode]);
+
   const handleSelectProfile = (key: ProfileKey) => {
     if (key === activeKey) return;
     setActiveKey(key);
   };
 
-  const handleNexusTrigger = () => {
+  const handleToggleEngage = () => {
+    // Ignore rapid re-clicks while a transition is already in flight — letting
+    // them queue up is what makes spam-clicking look broken.
+    if (isWaving) return;
+
+    const engaging = !focusMode;
+    if (engaging) {
+      // Expanding out of the dashboard Nexus button — it's mounted right now.
+      const rect = dashboardNexusRef.current?.getBoundingClientRect();
+      if (rect) {
+        setWaveOrigin({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+      }
+    } else {
+      // Collapsing back into the dashboard Nexus button — it's unmounted while
+      // focus mode is active, so use its last measured position instead.
+      setWaveOrigin(dashboardNexusOrigin.current);
+    }
+    setWaveDirection(engaging ? "expand" : "collapse");
     setIsWaving(true);
     setWaveId((n) => n + 1);
-    setFocusMode((prev) => !prev);
-    window.setTimeout(() => setIsWaving(false), 650);
+    setFocusMode(engaging);
+
+    window.clearTimeout(waveTimeoutRef.current);
+    waveTimeoutRef.current = window.setTimeout(() => setIsWaving(false), 1100);
   };
+
+  useEffect(() => () => window.clearTimeout(waveTimeoutRef.current), []);
 
   return (
     <div className="relative flex h-screen w-full flex-col overflow-hidden bg-black text-slate-100">
@@ -263,10 +270,15 @@ export default function CommandDeck(): React.JSX.Element {
           0%, 100% { opacity: 0.5; }
           50% { opacity: 0.85; }
         }
-        @keyframes clip-wave {
-          0% { clip-path: circle(0% at 50% 50%); opacity: 0.95; }
-          55% { clip-path: circle(70% at 50% 50%); opacity: 0.65; }
-          100% { clip-path: circle(150% at 50% 50%); opacity: 0; }
+        @keyframes clip-wave-expand {
+          0% { clip-path: circle(0% at var(--wave-x) var(--wave-y)); opacity: 0.95; }
+          55% { clip-path: circle(70% at var(--wave-x) var(--wave-y)); opacity: 0.65; }
+          100% { clip-path: circle(150% at var(--wave-x) var(--wave-y)); opacity: 0; }
+        }
+        @keyframes clip-wave-collapse {
+          0% { clip-path: circle(150% at var(--wave-x) var(--wave-y)); opacity: 0; }
+          45% { clip-path: circle(60% at var(--wave-x) var(--wave-y)); opacity: 0.6; }
+          100% { clip-path: circle(0% at var(--wave-x) var(--wave-y)); opacity: 0.95; }
         }
         @keyframes cursor-blink {
           0%, 49% { opacity: 1; }
@@ -278,8 +290,12 @@ export default function CommandDeck(): React.JSX.Element {
         .canvas-breathe {
           animation: canvas-breathe 6s ease-in-out infinite;
         }
-        .clip-wave {
-          animation: clip-wave 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+        .clip-wave-expand {
+          animation: clip-wave-expand 1s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+          will-change: clip-path, opacity;
+        }
+        .clip-wave-collapse {
+          animation: clip-wave-collapse 1s cubic-bezier(0.65, 0, 0.35, 1) forwards;
           will-change: clip-path, opacity;
         }
         .terminal-cursor {
@@ -298,7 +314,9 @@ export default function CommandDeck(): React.JSX.Element {
       <div
         className="canvas-breathe pointer-events-none fixed inset-0 z-0 transition-colors duration-700"
         style={{
-          background: `radial-gradient(circle at 50% 35%, ${active.accentDim}, transparent 65%)`,
+          background: `radial-gradient(circle at 50% 35%, ${
+            focusMode ? active.accentDim : active.accentMutedDim
+          }, transparent 65%)`,
         }}
       />
 
@@ -306,10 +324,16 @@ export default function CommandDeck(): React.JSX.Element {
       {isWaving && (
         <div
           key={waveId}
-          className="clip-wave pointer-events-none fixed inset-0 z-50"
-          style={{
-            background: `radial-gradient(circle at 50% 50%, ${active.accent} 0%, ${active.accentSoft} 45%, transparent 75%)`,
-          }}
+          className={`pointer-events-none fixed inset-0 z-50 ${
+            waveDirection === "expand" ? "clip-wave-expand" : "clip-wave-collapse"
+          }`}
+          style={
+            {
+              "--wave-x": `${waveOrigin.x}px`,
+              "--wave-y": `${waveOrigin.y}px`,
+              background: `radial-gradient(circle at ${waveOrigin.x}px ${waveOrigin.y}px, ${active.accent} 0%, ${active.accentSoft} 45%, transparent 75%)`,
+            } as React.CSSProperties
+          }
         />
       )}
 
@@ -320,8 +344,9 @@ export default function CommandDeck(): React.JSX.Element {
 
       {focusMode && (
         <button
-          onClick={() => setFocusMode(false)}
-          className="fixed right-4 top-4 z-40 rounded-full border border-slate-700 bg-slate-950/80 px-4 py-2 text-xs uppercase tracking-widest text-slate-400 backdrop-blur transition hover:border-slate-500 hover:text-slate-200 sm:right-6"
+          onClick={handleToggleEngage}
+          disabled={isWaving}
+          className="fixed right-4 top-4 z-40 rounded-full border border-slate-700 bg-slate-950/80 px-4 py-2 text-xs uppercase tracking-widest text-slate-400 backdrop-blur transition hover:border-slate-500 hover:text-slate-200 disabled:pointer-events-none disabled:opacity-50 sm:right-6"
         >
           Exit Focus
         </button>
@@ -331,38 +356,40 @@ export default function CommandDeck(): React.JSX.Element {
         {focusMode ? (
           /* Lockdown focus view — everything but the Nexus and active profile is stripped away */
           <div className="flex flex-1 flex-col items-center justify-center gap-6 px-4">
-            <NexusButton active={active} focusMode={focusMode} onClick={handleNexusTrigger} large />
+            <NexusButton active={active} focusMode={focusMode} onClick={handleToggleEngage} disabled={isWaving} large />
             <p className={`text-sm uppercase tracking-[0.4em] ${active.textGlow}`}>
               {active.label} &mdash; {active.sublabel}
             </p>
           </div>
         ) : (
-          <div className="grid flex-1 grid-cols-1 gap-4 overflow-hidden p-4 sm:p-6 lg:grid-cols-[1fr_320px] lg:gap-6">
-            {/* Main stage */}
-            <div className="flex flex-col gap-6 overflow-y-auto pr-1 lg:pr-2">
-              <div className="flex flex-col items-center gap-4 pt-8">
-                <NexusButton active={active} focusMode={focusMode} onClick={handleNexusTrigger} />
-                <p className="text-xs uppercase tracking-widest text-slate-500">
-                  Nexus Trigger &mdash; {active.label}
-                </p>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                {PROFILE_ORDER.map((key) => (
-                  <ProfileCard
-                    key={key}
-                    profile={PROFILES[key]}
-                    isActive={key === activeKey}
-                    onSelect={() => handleSelectProfile(key)}
-                  />
-                ))}
-              </div>
-
-              <RoomSimulator active={active} />
+          <div className="flex flex-1 flex-col gap-6 overflow-y-auto p-4 sm:p-6">
+            <div className="flex flex-col items-center gap-4 pt-8">
+              <NexusButton
+                ref={dashboardNexusRef}
+                active={active}
+                focusMode={focusMode}
+                onClick={handleToggleEngage}
+                disabled={isWaving}
+              />
+              <p className="text-xs uppercase tracking-widest text-slate-500">
+                Nexus Trigger &mdash; {active.label}
+              </p>
             </div>
 
-            {/* Context Crisis Statistics Terminal */}
-            <StatsTerminal />
+            <div className="mx-auto grid w-full max-w-4xl grid-cols-2 gap-3 sm:grid-cols-4">
+              {PROFILE_ORDER.map((key) => (
+                <ProfileCard
+                  key={key}
+                  profile={PROFILES[key]}
+                  isActive={key === activeKey}
+                  onSelect={() => handleSelectProfile(key)}
+                />
+              ))}
+            </div>
+
+            <div className="mx-auto w-full max-w-4xl">
+              <RoomSimulator active={active} />
+            </div>
           </div>
         )}
 
@@ -398,28 +425,32 @@ export default function CommandDeck(): React.JSX.Element {
   );
 }
 
-function NexusButton({
-  active,
-  focusMode,
-  onClick,
-  large,
-}: {
-  active: Profile;
-  focusMode: boolean;
-  onClick: () => void;
-  large?: boolean;
-}): React.JSX.Element {
+const NexusButton = React.forwardRef<
+  HTMLButtonElement,
+  {
+    active: Profile;
+    focusMode: boolean;
+    onClick: () => void;
+    disabled?: boolean;
+    large?: boolean;
+  }
+>(function NexusButton({ active, focusMode, onClick, disabled, large }, ref) {
+  const borderColor = focusMode ? active.accent : active.accentMuted;
+  const glowSoft = focusMode ? active.accentSoft : active.accentMutedSoft;
+
   return (
     <button
+      ref={ref}
       onClick={onClick}
-      className={`nexus-pulse group relative flex items-center justify-center rounded-full border-2 bg-gradient-to-b from-[#1e1e1e] to-black transition-transform duration-300 active:scale-95 ${
+      disabled={disabled}
+      className={`nexus-pulse group relative flex items-center justify-center rounded-full border-2 bg-gradient-to-b from-[#1e1e1e] to-black transition-all duration-500 active:scale-95 disabled:pointer-events-none disabled:active:scale-100 ${
         large ? "h-56 w-56 sm:h-72 sm:w-72" : "h-40 w-40 sm:h-52 sm:w-52"
       }`}
       style={
         {
-          borderColor: active.accent,
-          "--nexus-glow": active.accent,
-          "--nexus-glow-soft": active.accentSoft,
+          borderColor,
+          "--nexus-glow": borderColor,
+          "--nexus-glow-soft": glowSoft,
         } as React.CSSProperties
       }
     >
@@ -427,13 +458,13 @@ function NexusButton({
         className={`text-center font-bold uppercase tracking-[0.35em] transition-colors duration-500 ${
           large ? "text-lg sm:text-xl" : "text-sm sm:text-base"
         }`}
-        style={{ color: active.accent }}
+        style={{ color: borderColor }}
       >
         {focusMode ? "Engaged" : "Engage"}
       </span>
     </button>
   );
-}
+});
 
 function ProfileCard({
   profile,
@@ -454,14 +485,13 @@ function ProfileCard({
       }`}
       style={
         isActive
-          ? ({ "--tw-shadow-color": profile.accentSoft } as React.CSSProperties)
+          ? ({ "--tw-shadow-color": profile.accentMutedSoft } as React.CSSProperties)
           : undefined
       }
     >
       <span
-        className={`text-sm font-semibold sm:text-base ${
-          isActive ? profile.textGlow : "text-slate-200"
-        }`}
+        className="text-sm font-semibold sm:text-base transition-colors duration-500"
+        style={{ color: isActive ? profile.accentMuted : "#e2e8f0" }}
       >
         {profile.label}
       </span>
@@ -480,7 +510,7 @@ function RoomSimulator({ active }: { active: Profile }): React.JSX.Element {
         <svg viewBox="0 0 320 200" className="w-full rounded-lg">
           <defs>
             <radialGradient id="ambientGlow" cx="50%" cy="20%" r="80%">
-              <stop offset="0%" stopColor={active.accentSoft} />
+              <stop offset="0%" stopColor={active.accentMutedSoft} />
               <stop offset="100%" stopColor="transparent" />
             </radialGradient>
           </defs>
@@ -564,31 +594,5 @@ function RoomSimulator({ active }: { active: Profile }): React.JSX.Element {
         </div>
       </div>
     </section>
-  );
-}
-
-function StatsTerminal(): React.JSX.Element {
-  return (
-    <aside className="flex flex-col overflow-hidden rounded-2xl border border-[#1e1e1e] bg-[#0a0a0a]">
-      <div className="flex items-center gap-2 border-b border-[#1e1e1e] px-4 py-3">
-        <span className="h-2.5 w-2.5 rounded-full bg-red-500/70" />
-        <span className="h-2.5 w-2.5 rounded-full bg-amber-500/70" />
-        <span className="h-2.5 w-2.5 rounded-full bg-emerald-500/70" />
-        <span className="ml-2 text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-500">
-          Context Crisis Telemetry
-        </span>
-      </div>
-      <div className="command-deck-scroll flex-1 overflow-y-auto px-4 py-4 font-mono text-[11px] leading-relaxed">
-        {CRISIS_STATS.map((stat) => (
-          <div key={stat.id} className="mb-4 border-l-2 border-red-500/40 pl-3">
-            <p className="font-semibold uppercase tracking-wide text-red-400">
-              {stat.headline}:
-            </p>
-            <p className="mt-1 text-slate-300">{stat.body}</p>
-            <p className="mt-1 text-slate-600">(Source: {stat.source})</p>
-          </div>
-        ))}
-      </div>
-    </aside>
   );
 }
