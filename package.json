@@ -1,0 +1,22 @@
+{
+  "name": "monolith",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Monolith — environmental and workspace orchestration engine (backend).",
+  "main": "dist/main/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "npm run build && electron .",
+    "dev": "npm run build && MONOLITH_RENDERER_URL=http://localhost:5173 electron ."
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/ws": "^8.5.12",
+    "electron": "^31.3.1",
+    "typescript": "^5.5.4"
+  }
+}

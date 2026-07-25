@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "Monolith Orchestration Bridge",
+  "version": "1.0.0",
+  "description": "Receives reality-shift signals from the Monolith desktop host: purges and hydrates browser sessions and enforces the deep-work blockade.",
+  "minimum_chrome_version": "116",
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": ["tabs", "storage", "alarms", "declarativeNetRequest"],
+  "host_permissions": ["<all_urls>"],
+  "web_accessible_resources": [
+    {
+      "resources": ["blocked.html", "blocked.js"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "action": {
+    "default_title": "Monolith"
+  }
+}
