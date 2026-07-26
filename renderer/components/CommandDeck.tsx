@@ -54,11 +54,13 @@ function summarize(profile: Profile): string {
   const bits: string[] = [];
   if (purge.launch_applications.length > 0) bits.push(`${purge.launch_applications.length} apps`);
   const killCount = purge.kill_background_processes.length;
-  if (killCount > 0 || purge.kill_categories.length > 0) {
-    // Categories resolve to a different count per machine, so only the named
-    // list gets an exact number — a category-only mood still needs to say
-    // something, or it reads as doing nothing at all.
-    bits.push(killCount > 0 ? `blocks ${killCount}` : "blocks apps");
+  const categoryCount = purge.kill_categories.length;
+  if (killCount > 0) {
+    bits.push(`blocks ${killCount}`);
+  } else if (categoryCount > 0) {
+    // Categories resolve to a different app count per machine, so we count
+    // the categories themselves rather than showing a vague "blocks apps".
+    bits.push(`blocks ${categoryCount} ${categoryCount === 1 ? "category" : "categories"}`);
   }
   if (purge.close_browser_tabs) bits.push("clears tabs");
   if (purge.block_distractions) bits.push("blocks sites");
@@ -723,7 +725,7 @@ export default function CommandDeck(): React.JSX.Element {
               </p>
             </div>
 
-            <div className="mx-auto grid w-full max-w-4xl grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+            <div className="mx-auto grid w-full max-w-6xl grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
               {profiles.map((profile, index) => (
                 <ProfileCard
                   key={profile.id}
@@ -1076,23 +1078,24 @@ function ProfileCard({
         </div>
 
         <div className="flex min-w-0 flex-1 flex-col items-start gap-1 text-left">
-          <span className="flex min-w-0 items-center gap-2 self-stretch">
+          <span className="flex w-full min-w-0 items-center gap-2">
             <span
               className="h-2.5 w-2.5 shrink-0 rounded-full transition-colors duration-500"
               style={{ backgroundColor: mutedHex }}
             />
             <span
-              className="min-w-0 truncate font-display text-sm font-semibold sm:text-base transition-colors duration-500"
+              className="min-w-0 flex-1 truncate font-display text-sm font-semibold sm:text-base transition-colors duration-500"
               style={{ color: isActive ? mutedHex : undefined }}
               title={profile.name}
             >
               {profile.name}
             </span>
           </span>
-          <span className="line-clamp-1 text-[11px] leading-snug text-slate-500">{summarize(profile)}</span>
-          {scheduleLine && (
-            <span className="line-clamp-1 text-[11px] leading-snug text-slate-600">{scheduleLine}</span>
-          )}
+          <span className="line-clamp-1 w-full text-[11px] leading-snug text-slate-500">{summarize(profile)}</span>
+          {/* Always reserved, even when unscheduled, so cards in the same row stay a consistent height. */}
+          <span className={`line-clamp-1 w-full text-[11px] leading-snug text-slate-600 ${scheduleLine ? "" : "invisible"}`}>
+            {scheduleLine ?? "placeholder"}
+          </span>
         </div>
 
         <div className="flex shrink-0 items-center gap-1">
@@ -1203,30 +1206,45 @@ function ScheduleCard({
       days: schedule.days.includes(day) ? schedule.days.filter((d) => d !== day) : [...schedule.days, day].sort(),
     });
 
+  const addSchedule = () => onChange({ enabled: true }, `${profileName} now engages and disengages on a schedule.`);
+  const removeSchedule = () => onChange({ enabled: false }, `${profileName} schedule removed.`);
+
   return (
     <section className="rounded-2xl border border-[#1e1e1e] bg-[#121218]/60 p-4 sm:p-6">
       <div className="mb-4 flex items-baseline justify-between gap-3">
         <h2 className="text-sm font-medium text-slate-300">Schedule</h2>
-        <span className="text-xs text-slate-600">{profileName}</span>
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-slate-600">{profileName}</span>
+          {schedule.enabled ? (
+            <button
+              type="button"
+              onClick={removeSchedule}
+              aria-label={`Remove ${profileName} schedule`}
+              title="Remove schedule"
+              className="flex h-6 w-6 items-center justify-center rounded-full text-slate-500 opacity-70 transition hover:bg-red-500/10 hover:text-red-300 hover:opacity-100"
+            >
+              <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 4.5h10M6.5 4.5v-1a1 1 0 011-1h1a1 1 0 011 1v1M6.5 7.5v4M9.5 7.5v4M4.5 4.5l.6 8a1 1 0 001 .9h3.8a1 1 0 001-.9l.6-8" />
+              </svg>
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={addSchedule}
+              aria-label={`Add schedule for ${profileName}`}
+              title="Add schedule"
+              className="flex h-6 w-6 items-center justify-center rounded-full border border-[#242430] text-slate-400 transition hover:border-indigo-400 hover:text-indigo-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-300"
+            >
+              <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+                <path d="M8 3v10M3 8h10" />
+              </svg>
+            </button>
+          )}
+        </div>
       </div>
 
-      <label className="flex cursor-pointer items-center gap-2.5 text-sm text-slate-300">
-        <input
-          type="checkbox"
-          checked={schedule.enabled}
-          onChange={(event) =>
-            onChange(
-              { enabled: event.target.checked },
-              `${profileName} ${event.target.checked ? "will run on a schedule." : "schedule turned off."}`,
-            )
-          }
-          className="h-4 w-4 cursor-pointer accent-indigo-500"
-        />
-        Engage and disengage on a timer
-      </label>
-
-      {schedule.enabled && (
-        <div className="mt-4 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+      {schedule.enabled ? (
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex flex-wrap items-center gap-4">
             <label className="flex items-center gap-2 text-xs text-slate-500">
               Engage
@@ -1272,6 +1290,10 @@ function ScheduleCard({
             </div>
           </div>
         </div>
+      ) : (
+        <p className="text-xs text-slate-600">
+          No schedule set. Use the plus button to have {profileName} engage and disengage automatically.
+        </p>
       )}
     </section>
   );
