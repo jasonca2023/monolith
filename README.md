@@ -33,7 +33,20 @@ npm run typecheck    # all three tsconfigs, no emit
 
 npm run dev:renderer # terminal 1 — Vite on :5173
 npm run dev          # terminal 2 — shell pointed at that dev server
+
+npm run package      # builds release/mac-arm64/Monolith.app — a real app bundle
+npm run package:dmg  # same, plus a .dmg for handing to someone else
 ```
+
+`npm start` runs the unpacked Electron binary directly (`electron .`), so
+macOS shows the process as "Electron" in the Dock and Activity Monitor — that
+identity comes from the bundle actually being `node_modules/electron/dist/
+Electron.app`, and no in-app renaming can change it. `npm run package` uses
+electron-builder to produce a real `Monolith.app` (`build/icon.icns`,
+`com.jasonca2023.monolith`) that shows up as Monolith everywhere, signed with
+whatever local Apple Development identity is in Keychain. Not notarized —
+fine to run locally, would need `codesign`/notarization to hand to someone
+whose Mac doesn't trust your dev identity.
 
 Types live in `src/shared/types.ts` and are imported by the main process, the
 preload bridge and the renderer alike. The renderer used to redeclare the config

@@ -1470,6 +1470,13 @@ function registerIpcHandlers(): void {
 /* Lifecycle                                                                   */
 /* -------------------------------------------------------------------------- */
 
+// Electron infers the app name from package.json for userData and the Dock
+// tooltip, but the in-app menu bar (top-left, bold) needs this set explicitly
+// — otherwise a dev run shows "Electron" there even though everything else
+// already says Monolith. Packaging (see `npm run package`) is what actually
+// renames the Dock icon and process itself; this covers the unpacked case.
+app.setName('Monolith');
+
 if (!app.requestSingleInstanceLock()) {
   log('warn', 'shell', 'another Monolith instance owns the bridge port, exiting');
   app.quit();
