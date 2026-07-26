@@ -19,47 +19,6 @@ const NEUTRAL_HEX = "#FFFFFF";
 const MUTE_TOWARD = "#3f3f46";
 const MUTE_FACTOR = 0.55;
 
-interface CrisisStat {
-  id: string;
-  headline: string;
-  body: string;
-  source: string;
-}
-
-/** The case for the app, in its own words. Cited so the claims are checkable. */
-const CRISIS_STATS: CrisisStat[] = [
-  {
-    id: "cognitive-drain",
-    headline: "COGNITIVE DRAIN EFFICIENCY DETECTED",
-    body: "Up to 40% of productive time is lost daily to task shifting and setup friction rituals.",
-    source: "American Psychological Association",
-  },
-  {
-    id: "system-overload",
-    headline: "SYSTEM OVERLOAD WARNING",
-    body: "Knowledge workers lose an average of 2 hours per day to workplace distractions, draining $650 Billion annually from the US Economy.",
-    source: "Basex, Inc. (Jonathan Spira)",
-  },
-  {
-    id: "recovery-threshold",
-    headline: "DISRUPTION RECOVERY THRESHOLD",
-    body: "It takes an average of 23 minutes and 15 seconds to fully refocus after a single digital workplace disruption.",
-    source: "Dr. Gloria Mark, UC Irvine",
-  },
-  {
-    id: "clutter-factor",
-    headline: "DIGITAL CLUTTER FACTOR",
-    body: "Modern workers toggle between browser tabs and applications up to 1,200 times per day, wasting 3.6 hours per week in context switching.",
-    source: "Asana & Harvard Business Review",
-  },
-  {
-    id: "fragmentation-coefficient",
-    headline: "FRAGMENTATION COEFFICIENT",
-    body: "The average uninterrupted focus session on an un-orchestrated desktop workspace lasts an abysmal 13 minutes and 7 seconds.",
-    source: "ActivTrak State of the Workplace study",
-  },
-];
-
 type LogTone = "success" | "network" | "iot" | "sonic" | "warn" | "error";
 
 interface LogLine {
@@ -800,21 +759,17 @@ export default function CommandDeck(): React.JSX.Element {
               </div>
             )}
 
-            <div className="mx-auto grid w-full max-w-6xl gap-4 pb-2 lg:grid-cols-5">
-              <div className="lg:col-span-3">
-                <RoomSimulator
-                  accentSoft={accentMutedSoft}
-                  lights={lights}
-                  binaries={binaries}
-                  bridgeIp={bridgeIp}
-                  sonicProfile={sonicProfile}
-                  brightness={active?.physical_orchestration.brightness ?? 0}
-                  engaged={focusMode}
-                />
-              </div>
-              <div className="lg:col-span-2">
-                <StatsTerminal stats={stats} />
-              </div>
+            <div className="mx-auto grid w-full max-w-6xl items-stretch gap-4 pb-2 lg:grid-cols-2">
+              <RoomSimulator
+                accentSoft={accentMutedSoft}
+                lights={lights}
+                binaries={binaries}
+                bridgeIp={bridgeIp}
+                sonicProfile={sonicProfile}
+                brightness={active?.physical_orchestration.brightness ?? 0}
+                engaged={focusMode}
+              />
+              <StatsTerminal stats={stats} />
             </div>
           </div>
         )}
@@ -842,17 +797,27 @@ export default function CommandDeck(): React.JSX.Element {
                 {extensionOnline ? "Browser connected" : "Browser not connected"}
               </span>
             </div>
-            {showActivity && (
-              <div className="command-deck-scroll mt-2 h-28 overflow-y-auto rounded-lg border border-slate-800 bg-black/60 p-3 text-xs leading-relaxed sm:h-32">
-                {logLines.map((line) => (
-                  <div key={line.id} className="flex gap-2">
-                    <span className="shrink-0 font-mono text-[11px] text-slate-600">{line.time}</span>
-                    <span className={LOG_TONE_CLASS[line.tone]}>{line.text}</span>
-                  </div>
-                ))}
-                <div ref={logEndRef} />
+            {/* Always rendered — a 0fr/1fr grid-template-rows transition is
+                what lets this slide open/closed, since height can't be
+                animated to "auto" any other way in CSS. The inner
+                overflow-hidden is what actually clips the content at 0fr. */}
+            <div
+              className={`grid transition-[grid-template-rows,opacity,margin-top] duration-300 ease-out ${
+                showActivity ? "mt-2 grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0"
+              }`}
+            >
+              <div className="overflow-hidden">
+                <div className="command-deck-scroll h-28 overflow-y-auto rounded-lg border border-slate-800 bg-black/60 p-3 text-xs leading-relaxed sm:h-32">
+                  {logLines.map((line) => (
+                    <div key={line.id} className="flex gap-2">
+                      <span className="shrink-0 font-mono text-[11px] text-slate-600">{line.time}</span>
+                      <span className={LOG_TONE_CLASS[line.tone]}>{line.text}</span>
+                    </div>
+                  ))}
+                  <div ref={logEndRef} />
+                </div>
               </div>
-            )}
+            </div>
           </div>
         )}
       </div>
@@ -884,9 +849,11 @@ function TitleBar({
   const api = window.monolith;
 
   return (
-    <header className="app-drag relative z-40 flex h-11 shrink-0 items-center justify-between px-4 sm:px-6">
-      <div className="flex items-center gap-3">
-        <span className="font-display text-sm font-semibold tracking-wide text-slate-300">
+    <header className="app-drag relative z-40 flex h-11 shrink-0 items-center justify-between pr-4 sm:pr-6">
+      {/* pl-20 clears the native traffic-light buttons (trafficLightPosition
+          x:16 in main.ts) — the wordmark used to sit directly under them. */}
+      <div className="flex items-center gap-3 pl-20">
+        <span className="mt-0.5 font-display text-sm font-semibold tracking-wide text-slate-300">
           Monolith
         </span>
         {shellReady === false && (
@@ -1108,21 +1075,24 @@ function ProfileCard({
           </svg>
         </div>
 
-        <div className="flex flex-1 flex-col items-start gap-1 text-left">
-          <span className="flex items-center gap-2">
+        <div className="flex min-w-0 flex-1 flex-col items-start gap-1 text-left">
+          <span className="flex min-w-0 items-center gap-2 self-stretch">
             <span
               className="h-2.5 w-2.5 shrink-0 rounded-full transition-colors duration-500"
               style={{ backgroundColor: mutedHex }}
             />
             <span
-              className="font-display text-sm font-semibold sm:text-base transition-colors duration-500"
+              className="min-w-0 truncate font-display text-sm font-semibold sm:text-base transition-colors duration-500"
               style={{ color: isActive ? mutedHex : undefined }}
+              title={profile.name}
             >
               {profile.name}
             </span>
           </span>
-          <span className="text-[11px] leading-snug text-slate-500">{summarize(profile)}</span>
-          {scheduleLine && <span className="text-[11px] leading-snug text-slate-600">{scheduleLine}</span>}
+          <span className="line-clamp-1 text-[11px] leading-snug text-slate-500">{summarize(profile)}</span>
+          {scheduleLine && (
+            <span className="line-clamp-1 text-[11px] leading-snug text-slate-600">{scheduleLine}</span>
+          )}
         </div>
 
         <div className="flex shrink-0 items-center gap-1">
@@ -1197,27 +1167,20 @@ function StatCell({ value, label }: { value: string; label: string }): React.JSX
  */
 function StatsTerminal({ stats }: { stats: SessionStats | null }): React.JSX.Element {
   return (
-    <aside className="flex flex-col overflow-hidden rounded-2xl border border-[#1e1e1e] bg-[#0a0a0f]">
-      {stats && (
-        <div className="grid grid-cols-4 gap-2 border-b border-[#1e1e1e] px-4 py-4">
-          <StatCell value={`${stats.todayMinutes}m`} label="today" />
-          <StatCell value={String(stats.streakDays)} label="day streak" />
-          <StatCell value={String(stats.totalSessions)} label="sessions" />
-          <StatCell value={String(stats.totalBlocks)} label="blocked" />
-        </div>
-      )}
-      <div className="border-b border-[#1e1e1e] px-4 py-3">
-        <span className="text-xs font-medium text-slate-400">Why this matters</span>
+    <section className="flex h-full flex-col rounded-2xl border border-[#1e1e1e] bg-[#121218]/60 p-4 sm:p-6">
+      <div className="mb-4 flex items-baseline justify-between gap-3">
+        <h2 className="text-sm font-medium text-slate-300">Stats</h2>
+        <span className="text-xs text-slate-600">
+          {stats && stats.totalSessions > 0 ? `${stats.totalSessions} logged` : "No sessions yet"}
+        </span>
       </div>
-      <div className="command-deck-scroll flex max-h-72 flex-col gap-4 overflow-y-auto px-4 py-4 text-sm leading-relaxed lg:max-h-none">
-        {CRISIS_STATS.map((stat) => (
-          <div key={stat.id} className="border-l-2 border-red-500/40 pl-3">
-            <p className="text-slate-200">{stat.body}</p>
-            <p className="mt-1 text-xs text-slate-600">{stat.source}</p>
-          </div>
-        ))}
+      <div className="grid flex-1 grid-cols-2 place-content-center gap-6 sm:grid-cols-4">
+        <StatCell value={`${stats?.todayMinutes ?? 0}m`} label="today" />
+        <StatCell value={String(stats?.streakDays ?? 0)} label="day streak" />
+        <StatCell value={String(stats?.totalSessions ?? 0)} label="sessions" />
+        <StatCell value={String(stats?.totalBlocks ?? 0)} label="blocked" />
       </div>
-    </aside>
+    </section>
   );
 }
 
